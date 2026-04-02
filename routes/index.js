@@ -11,14 +11,14 @@ router.use('/auth', require('../modules/auth/auth.routes'));
 router.use('/users', require('../modules/users/users.routes'));
 router.use('/roles', require('../modules/roles/roles.routes'));
 router.use('/warehouses', require('../modules/warehouses/warehouses.routes'));
+router.use('/merchant-skus', require('../modules/merchantSkus/merchantSkus.routes'));
+router.use('/combine-skus', require('../modules/combineskus/combineskus.routes'));
 
 // TODO: Uncomment as you build each module
 // router.use('/companies',    require('../modules/companies/companies.routes'));
 // router.use('/roles',        require('../modules/roles/roles.routes'));
 // router.use('/platforms',    require('../modules/platforms/platforms.routes'));
 // router.use('/products',     require('../modules/products/products.routes'));
-// router.use('/merchant-skus',require('../modules/merchantSkus/merchantSkus.routes'));
-// router.use('/combine-skus', require('../modules/combineskus/combineskus.routes'));
 // router.use('/sku-mapping',  require('../modules/skuMapping/skuMapping.routes'));
 // router.use('/inventory',    require('../modules/inventory/inventory.routes'));
 // router.use('/inbound',      require('../modules/inbound/inbound.routes'));

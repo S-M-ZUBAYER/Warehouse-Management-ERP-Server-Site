@@ -8,6 +8,9 @@ const User = require('./User')(sequelize);
 const UserStorePermission = require('./UserStorePermission')(sequelize);
 const UserWarehousePermission = require('./UserWarehousePermission')(sequelize);
 const Warehouse = require('./Warehouse')(sequelize);
+const MerchantSku = require('./MerchantSku')(sequelize);
+const CombineSku = require('./CombineSku')(sequelize);
+const CombineSkuItem = require('./CombineSkuItem')(sequelize);
 
 // TODO: Uncomment as you build each module
 // const WarehouseZone         = require('./WarehouseZone')(sequelize);
@@ -36,6 +39,9 @@ const models = {
     UserStorePermission,
     UserWarehousePermission,
     Warehouse,
+    MerchantSku,
+    CombineSku,
+    CombineSkuItem,
     // Add here as you uncomment above
 };
 
