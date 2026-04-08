@@ -59,7 +59,7 @@ const registerAdmin = async (data) => {
             email: userEmail,
             phone: phone || null,
             timezone: timezone || 'UTC',
-            currency: currency || 'USD',
+            currency: (currency && currency.length === 3) ? currency : 'USD',
             plan: 'trial',
             status: 'trial',
             trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days
@@ -71,10 +71,65 @@ const registerAdmin = async (data) => {
             name: 'Owner',
             description: 'Full access — company owner',
             permissions: JSON.stringify({
-                dashboard: true, users: true, roles: true, warehouses: true,
-                platforms: true, products: true, inventory: true,
-                inbound: true, orders: true, reports: true, settings: true,
+                "dashboard": {
+                    "access": true
+                },
+                "product_management": {
+                    "access": true,
+                    "sub": {
+                        "product_list": true,
+                        "combine_sku": true
+                    }
+                },
+                "inventory_management": {
+                    "access": true,
+                    "sub": {
+                        "inventory_list": true,
+                        "inbound": {
+                            "access": true,
+                            "sub": {
+                                "inbound_draft": true,
+                                "inbound_on_the_way": true,
+                                "inbound_complete": true
+                            }
+                        }
+                    }
+                },
+                "order_management": {
+                    "access": true,
+                    "sub": {
+                        "order_processing": {
+                            "access": true,
+                            "sub": {
+                                "new_order": true,
+                                "processed_order": true,
+                                "shipped_order": true,
+                                "completed_order": true,
+                                "all_order": true,
+                                "canceled_order": true
+                            }
+                        },
+                        "manual_order": true
+                    }
+                },
+                "warehouse_management": {
+                    "access": true
+                },
+                "system_configuration": {
+                    "access": true,
+                    "sub": {
+                        "store_authorization": true,
+                        "account_management": {
+                            "access": true,
+                            "sub": {
+                                "sub_account": true,
+                                "role_management": true
+                            }
+                        }
+                    }
+                }
             }),
+
         }, { transaction: t });
 
         // 3. Create the admin user
@@ -600,6 +655,366 @@ const updateSubAccount = async (adminUser, userId, data) => {
     return getSubAccountById(adminUser, userId);
 };
 
+// ─── Update and Create Sub Account ───────────────────────────────────────────────────────
+
+const patchSubAccount = async (adminUser, targetEmail, data) => {
+    const models = require('../../models');
+    const { User, Role, UserStorePermission, UserWarehousePermission } = models;
+    const Warehouse = models.Warehouse || null;
+    const PlatformConnection = models.PlatformConnection || null;
+
+    if (!targetEmail) {
+        const err = new Error('targetEmail is undefined');
+        err.statusCode = 500;
+        throw err;
+    }
+
+    if (!['owner', 'admin'].includes(adminUser.role)) {
+        const err = new Error('Permission denied');
+        err.statusCode = 403;
+        throw err;
+    }
+
+    // ✅ Removed role: { [Op.ne]: 'owner' } — owner can also be updated
+    const user = await User.findOne({
+        where: {
+            email: targetEmail,
+            company_id: adminUser.companyId,
+        },
+    });
+
+    if (!user) {
+        const err = new Error('User not found');
+        err.statusCode = 404;
+        throw err;
+    }
+
+    const userId = user.id;
+
+    let resolvedRoleName;
+    if (data.roleId !== undefined) {
+        const role = await Role.findOne({
+            where: { id: data.roleId, company_id: adminUser.companyId },
+        });
+        if (!role) {
+            const err = new Error('Invalid role for this company');
+            err.statusCode = 400;
+            throw err;
+        }
+        resolvedRoleName = role.name.toLowerCase();
+    }
+
+    if (data.warehouseId !== undefined && Warehouse) {
+        const warehouse = await Warehouse.findOne({
+            where: { id: data.warehouseId, company_id: adminUser.companyId },
+        });
+        if (!warehouse) {
+            const err = new Error('Invalid warehouse for this company');
+            err.statusCode = 400;
+            throw err;
+        }
+    }
+
+    await sequelize.transaction(async (t) => {
+        const updates = {};
+        if (data.name !== undefined) updates.name = data.name;
+        if (data.department !== undefined) updates.department = data.department;
+        if (data.designation !== undefined) updates.designation = data.designation;
+        if (data.phone !== undefined) updates.phone = data.phone;
+        if (data.address !== undefined) updates.address = data.address;
+        if (data.isActive !== undefined) updates.is_active = data.isActive;
+        if (data.warehouseId !== undefined) updates.warehouse_id = data.warehouseId;
+        if (data.avatar !== undefined) updates.avatar_url = `data:image/jpeg;base64,${data.avatar}`;
+
+        if (data.roleId !== undefined) {
+            updates.role_id = data.roleId;
+            updates.role = resolvedRoleName;
+        }
+
+        if (data.password !== undefined) {
+            updates.password = await hashPassword(data.password);
+        }
+
+        if (Object.keys(updates).length > 0) {
+            await user.update(updates, { transaction: t });
+        }
+
+        if (data.storePermissions !== undefined) {
+            if (data.storePermissions.length > 0 && PlatformConnection) {
+                const connectionIds = data.storePermissions.map(p => p.connectionId);
+                const validCount = await PlatformConnection.count({
+                    where: { id: { [Op.in]: connectionIds }, company_id: adminUser.companyId },
+                });
+                if (validCount !== connectionIds.length) {
+                    const err = new Error('One or more store connections are invalid');
+                    err.statusCode = 400;
+                    throw err;
+                }
+            }
+
+            await UserStorePermission.destroy({
+                where: { company_id: adminUser.companyId, user_id: userId },
+                transaction: t,
+            });
+
+            if (data.storePermissions.length > 0) {
+                await UserStorePermission.bulkCreate(
+                    data.storePermissions.map(p => ({
+                        company_id: adminUser.companyId,
+                        user_id: userId,
+                        connection_id: p.connectionId,
+                        can_view: p.canView !== false,
+                        can_edit: p.canEdit || false,
+                    })),
+                    { transaction: t }
+                );
+            }
+        }
+
+        if (data.warehousePermissions !== undefined) {
+            if (data.warehousePermissions.length > 0 && Warehouse) {
+                const whIds = data.warehousePermissions.map(p => p.warehouseId);
+                const validCount = await Warehouse.count({
+                    where: { id: { [Op.in]: whIds }, company_id: adminUser.companyId },
+                });
+                if (validCount !== whIds.length) {
+                    const err = new Error('One or more warehouse IDs are invalid');
+                    err.statusCode = 400;
+                    throw err;
+                }
+            }
+
+            await UserWarehousePermission.destroy({
+                where: { company_id: adminUser.companyId, user_id: userId },
+                transaction: t,
+            });
+
+            if (data.warehousePermissions.length > 0) {
+                await UserWarehousePermission.bulkCreate(
+                    data.warehousePermissions.map(p => ({
+                        company_id: adminUser.companyId,
+                        user_id: userId,
+                        warehouse_id: p.warehouseId,
+                        can_view: p.canView !== false,
+                        can_edit: p.canEdit || false,
+                    })),
+                    { transaction: t }
+                );
+            }
+        }
+    });
+
+    await redis.flushByPattern(`company:${adminUser.companyId}:cache:users*`);
+
+    if (data.isActive === false) {
+        await redis.del(sessionKey(adminUser.companyId, userId));
+    }
+
+    return getSubAccountById(adminUser, userId);
+};
+
+
+// ─── UPSERT ───────────────────────────────────────────────────────────────────
+
+// const upsertSubAccount = async (adminUser, data) => {
+//     const { email } = data;
+
+//     if (!email) {
+//         const err = new Error('Email is required');
+//         err.statusCode = 400;
+//         throw err;
+//     }
+
+//     const { User } = require('../../models');
+
+//     // ✅ Find ANY user with this email in the company — including owner
+//     const existing = await User.findOne({
+//         where: { email, company_id: adminUser.companyId },
+//     });
+
+//     if (existing) {
+//         // ✅ Always UPDATE — owner, admin, or any role
+//         const { email: _removed, ...updateData } = data;
+//         return {
+//             status: 200,
+//             message: 'Sub account updated successfully',
+//             data: await patchSubAccount(adminUser, email, updateData),
+//         };
+//     }
+
+//     // ── CREATE — only when email truly does not exist in company ─────────
+//     const missing = ['accountId', 'name', 'password', 'roleId', 'warehouseId']
+//         .filter(f => data[f] === undefined || data[f] === null || data[f] === '');
+
+//     if (missing.length > 0) {
+//         const err = new Error('Validation failed');
+//         err.statusCode = 400;
+//         err.errors = missing.map(f => ({
+//             field: f,
+//             message: `${f} is required when creating a new sub account`,
+//         }));
+//         throw err;
+//     }
+
+//     return {
+//         status: 201,
+//         message: 'Sub account created successfully',
+//         data: await createSubAccount(adminUser, data),
+//     };
+// };
+
+
+const upsertSubAccount = async (adminUser, data) => {
+    const { email } = data;
+
+    if (!email) {
+        const err = new Error('Email is required');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const { User } = require('../../models');
+
+    // ── Step 1: Check same company first ─────────────────────────────────
+    const existingInCompany = await User.findOne({
+        where: { email, company_id: adminUser.companyId },
+    });
+
+    if (existingInCompany) {
+        // Email found in same company — just update (any role including owner)
+        const { email: _removed, ...updateData } = data;
+        return {
+            status: 200,
+            message: 'Sub account updated successfully',
+            data: await patchSubAccount(adminUser, email, updateData),
+        };
+    }
+
+    // ── Step 2: Check across ALL companies ───────────────────────────────
+    const existingElsewhere = await User.findOne({
+        where: { email }, // no company_id filter — global search
+    });
+
+    if (existingElsewhere) {
+        // ✅ Email belongs to another company (could be owner there)
+        // Force move them into this company as a sub account
+        const missing = ['accountId', 'name', 'roleId', 'warehouseId']
+            .filter(f => data[f] === undefined || data[f] === null || data[f] === '');
+
+        if (missing.length > 0) {
+            const err = new Error('Validation failed');
+            err.statusCode = 400;
+            err.errors = missing.map(f => ({
+                field: f,
+                message: `${f} is required when converting user to sub account`,
+            }));
+            throw err;
+        }
+
+        // Resolve role name
+        const { Role } = require('../../models');
+        const role = await Role.findOne({
+            where: { id: data.roleId, company_id: adminUser.companyId },
+        });
+        if (!role) {
+            const err = new Error('Invalid role for this company');
+            err.statusCode = 400;
+            throw err;
+        }
+
+        // Check accountId unique within this company
+        const accountIdTaken = await User.findOne({
+            where: { company_id: adminUser.companyId, account_id: data.accountId },
+        });
+        if (accountIdTaken) {
+            const err = new Error('Account ID already in use in this company');
+            err.statusCode = 409;
+            throw err;
+        }
+
+        // ✅ Update the existing user — reassign to this company as sub account
+        await existingElsewhere.update({
+            company_id: adminUser.companyId,   // move to this company
+            role: role.name.toLowerCase(),
+            role_id: data.roleId,
+            account_id: data.accountId,
+            name: data.name || existingElsewhere.name,
+            department: data.department || null,
+            designation: data.designation || null,
+            phone: data.phone || existingElsewhere.phone,
+            address: data.address || null,
+            is_active: data.isActive !== undefined ? data.isActive : true,
+            avatar_url: data.avatar ? `data:image/jpeg;base64,${data.avatar}` : existingElsewhere.avatar_url,
+            ...(data.password && { password: await hashPassword(data.password) }),
+        });
+
+        // Handle permissions for the converted user
+        const { UserStorePermission, UserWarehousePermission } = require('../../models');
+
+        if (data.storePermissions?.length > 0) {
+            await UserStorePermission.destroy({
+                where: { user_id: existingElsewhere.id },
+            });
+            await UserStorePermission.bulkCreate(
+                data.storePermissions.map(p => ({
+                    company_id: adminUser.companyId,
+                    user_id: existingElsewhere.id,
+                    connection_id: p.connectionId,
+                    can_view: p.canView !== false,
+                    can_edit: p.canEdit || false,
+                }))
+            );
+        }
+
+        if (data.warehousePermissions?.length > 0) {
+            await UserWarehousePermission.destroy({
+                where: { user_id: existingElsewhere.id },
+            });
+            await UserWarehousePermission.bulkCreate(
+                data.warehousePermissions.map(p => ({
+                    company_id: adminUser.companyId,
+                    user_id: existingElsewhere.id,
+                    warehouse_id: p.warehouseId,
+                    can_view: p.canView !== false,
+                    can_edit: p.canEdit || false,
+                }))
+            );
+        }
+
+        await redis.flushByPattern(`company:${adminUser.companyId}:cache:users*`);
+        // Also flush their old company cache
+        await redis.flushByPattern(`company:${existingElsewhere.company_id}:cache:users*`);
+        // Kill their existing session from old company
+        await redis.del(sessionKey(existingElsewhere.company_id, existingElsewhere.id));
+
+        return {
+            status: 200,
+            message: 'User converted to sub account successfully',
+            data: await getSubAccountById(adminUser, existingElsewhere.id),
+        };
+    }
+
+    // ── Step 3: Email not found anywhere — create fresh ──────────────────
+    const missing = ['accountId', 'name', 'password', 'roleId', 'warehouseId']
+        .filter(f => data[f] === undefined || data[f] === null || data[f] === '');
+
+    if (missing.length > 0) {
+        const err = new Error('Validation failed');
+        err.statusCode = 400;
+        err.errors = missing.map(f => ({
+            field: f,
+            message: `${f} is required when creating a new sub account`,
+        }));
+        throw err;
+    }
+
+    return {
+        status: 201,
+        message: 'Sub account created successfully',
+        data: await createSubAccount(adminUser, data, { skipEmailCheck: true }),
+    };
+};
+
 // ─── Delete Sub Account ───────────────────────────────────────────────────────
 
 const deleteSubAccount = async (adminUser, userId) => {
@@ -637,5 +1052,6 @@ module.exports = {
     getSubAccounts,
     getSubAccountById,
     updateSubAccount,
+    upsertSubAccount,
     deleteSubAccount,
 };

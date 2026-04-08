@@ -189,7 +189,98 @@ const options = {
                         warehousePermissions: { type: 'array', items: { type: 'object' } },
                     },
                 },
+                UpsertSubAccountRequest: {
+                    type: 'object',
+                    required: ['email'],
+                    description: `**Upsert** — single endpoint for create OR update.
+- If **email does not exist** in the company → creates the sub account (accountId, name, password, roleId, warehouseId become required).
+- If **email exists** → patches only the fields you provide (all fields optional except email).
+- Email itself is always the lookup key and cannot be changed.
+- Owner accounts can never be targeted via this endpoint.`,
+                    properties: {
+                        email: {
+                            type: 'string',
+                            format: 'email',
+                            example: 'jane@company.com',
+                            description: '**Required always** — used as the lookup key',
+                        },
 
+                        // ── Required on CREATE, optional on UPDATE ────────────────────────
+                        accountId: {
+                            type: 'string',
+                            example: 'EMP-001',
+                            description: 'Required on create. Must be unique within the company.',
+                        },
+                        name: {
+                            type: 'string',
+                            minLength: 2,
+                            maxLength: 100,
+                            example: 'Jane Smith',
+                            description: 'Required on create.',
+                        },
+                        password: {
+                            type: 'string',
+                            minLength: 8,
+                            example: 'Secret123',
+                            description: 'Required on create. Hashed server-side. Optional on update.',
+                        },
+                        roleId: {
+                            type: 'integer',
+                            minimum: 1,
+                            example: 2,
+                            description: 'Required on create. Must belong to the same company.',
+                        },
+                        warehouseId: {
+                            type: 'integer',
+                            minimum: 1,
+                            example: 1,
+                            description: 'Required on create. Must belong to the same company.',
+                        },
+
+                        // ── Always optional ───────────────────────────────────────────────
+                        department: { type: 'string', example: 'Operations' },
+                        designation: { type: 'string', example: 'Warehouse Manager' },
+                        phone: { type: 'string', example: '+60123456789' },
+                        address: { type: 'string', example: 'Kuala Lumpur, MY' },
+                        isActive: {
+                            type: 'boolean',
+                            example: true,
+                            description: 'Defaults to true on create. Setting false on update kills the user Redis session immediately.',
+                        },
+                        avatar: {
+                            type: 'string',
+                            description: 'Base64 encoded JPEG/PNG image.',
+                        },
+                        storePermissions: {
+                            type: 'array',
+                            description: 'Full replace on update — omit to leave unchanged, send [] to clear all.',
+                            example: [{ connectionId: 1, canView: true, canEdit: false }],
+                            items: {
+                                type: 'object',
+                                required: ['connectionId'],
+                                properties: {
+                                    connectionId: { type: 'integer', minimum: 1 },
+                                    canView: { type: 'boolean', default: true },
+                                    canEdit: { type: 'boolean', default: false },
+                                },
+                            },
+                        },
+                        warehousePermissions: {
+                            type: 'array',
+                            description: 'Full replace on update — omit to leave unchanged, send [] to clear all.',
+                            example: [{ warehouseId: 1, canView: true, canEdit: true }],
+                            items: {
+                                type: 'object',
+                                required: ['warehouseId'],
+                                properties: {
+                                    warehouseId: { type: 'integer', minimum: 1 },
+                                    canView: { type: 'boolean', default: true },
+                                    canEdit: { type: 'boolean', default: false },
+                                },
+                            },
+                        },
+                    },
+                },
 
                 // ── Roles ─────────────────────────────────────────────────────
                 RoleResponse: {
@@ -678,7 +769,70 @@ const options = {
                     },
                 },
             },
-
+            '/users/upsert': {
+                post: {
+                    tags: ['Users'],
+                    summary: 'Upsert sub account — create or update by email in body',
+                    description: `Checks if **email** (from request body) exists in the company.
+- **Not found** → creates new sub account (accountId, name, password, roleId, warehouseId required)
+- **Found** → updates only the fields provided`,
+                    security: [{ bearerAuth: [] }],
+                    // ✅ No parameters block — email is in the body not the path
+                    requestBody: {
+                        required: true,
+                        content: {
+                            'application/json': {
+                                schema: { $ref: '#/components/schemas/UpsertSubAccountRequest' },
+                                examples: {
+                                    createNew: {
+                                        summary: '🆕 Create — email not in DB',
+                                        value: {
+                                            email: 'jane@company.com',      // ✅ in body
+                                            accountId: 'EMP-001',
+                                            name: 'Jane Smith',
+                                            password: 'Secret123',
+                                            roleId: 2,
+                                            warehouseId: 1,
+                                            department: 'Operations',
+                                            designation: 'Warehouse Manager',
+                                            phone: '+60123456789',
+                                            storePermissions: [{ connectionId: 1, canView: true, canEdit: false }],
+                                            warehousePermissions: [{ warehouseId: 1, canView: true, canEdit: true }],
+                                        },
+                                    },
+                                    updateAny: {
+                                        summary: '✏️ Update — email exists in DB',
+                                        value: {
+                                            email: 'jane@company.com',      // ✅ in body — used as lookup key
+                                            name: 'Jane Johnson',
+                                            roleId: 3,
+                                            department: 'Logistics',
+                                            isActive: true,
+                                            storePermissions: [{ connectionId: 1, canView: true, canEdit: true }],
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    responses: {
+                        201: {
+                            description: 'Created — email was not found, new sub account created',
+                            content: { 'application/json': { schema: { type: 'object', properties: { success: { type: 'boolean', example: true }, message: { type: 'string', example: 'Sub account created successfully' }, data: { $ref: '#/components/schemas/SubAccountResponse' } } } } },
+                        },
+                        200: {
+                            description: 'Updated — email found, sub account patched',
+                            content: { 'application/json': { schema: { type: 'object', properties: { success: { type: 'boolean', example: true }, message: { type: 'string', example: 'Sub account updated successfully' }, data: { $ref: '#/components/schemas/SubAccountResponse' } } } } },
+                        },
+                        400: {
+                            description: 'Validation failed — missing required create fields or invalid IDs',
+                            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
+                        },
+                        403: { description: 'Permission denied — owner/admin role required' },
+                        409: { description: 'accountId already in use within this company' },
+                    },
+                },
+            },
 
             // ── Roles ────────────────────────────────────────────────────────
             '/roles/permissions/template': {

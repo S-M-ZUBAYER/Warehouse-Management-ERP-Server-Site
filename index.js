@@ -12,7 +12,8 @@ const swaggerUi = require('swagger-ui-express');
 
 // 3. Internal imports
 const { connectDB } = require('./config/database');
-const swaggerSpec = require('./config/swagger');
+// const swaggerSpec = require('./config/swagger');
+const swaggerSpec = require('./config/swagger/index');
 const { apiLimiter } = require('./config/rateLimiter');
 
 // 4. App init

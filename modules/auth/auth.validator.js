@@ -20,26 +20,26 @@ const registerAdminValidator = [
 
     // Optional fields
     body('companyName')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ max: 150 }).withMessage('Company name max 150 characters'),
 
     body('phone')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isMobilePhone().withMessage('Invalid phone number'),
 
     body('timezone')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim(),
 
     body('currency')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ min: 3, max: 3 }).withMessage('Currency must be 3-letter code like USD'),
 
     body('avatar')
-        .optional()
+        .optional({ values: 'falsy' })
         .custom((val) => { if (val && typeof val !== 'string') throw new Error('Avatar must be a string'); return true; }),
 ];
 
@@ -214,6 +214,96 @@ const updateSubAccountValidator = [
         .isArray(),
 ];
 
+const upsertSubAccountValidator = [
+    body('email')
+        .notEmpty().withMessage('Email is required')
+        .isEmail().withMessage('Invalid email address')
+        .normalizeEmail(),
+
+    body('accountId')
+        .optional()
+        .trim()
+        .isLength({ min: 1, max: 50 }).withMessage('Account ID must be 1–50 characters'),
+
+    body('name')
+        .optional()
+        .trim()
+        .isLength({ min: 2, max: 100 }).withMessage('Name must be 2–100 characters'),
+
+    body('password')
+        .optional()
+        .isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+
+    body('roleId')
+        .optional()
+        .isInt({ min: 1 }).withMessage('Invalid role ID'),
+
+    body('warehouseId')
+        .optional()
+        .isInt({ min: 1 }).withMessage('Invalid warehouse ID'),
+
+    body('department')
+        .optional()
+        .trim(),
+
+    body('designation')
+        .optional()
+        .trim(),
+
+    body('phone')
+        .optional()
+        .trim()
+        .isMobilePhone().withMessage('Invalid phone number'),
+
+    body('address')
+        .optional()
+        .trim(),
+
+    body('avatar')
+        .optional()
+        .custom((val) => {
+            if (val && typeof val !== 'string') throw new Error('Avatar must be a base64 string');
+            return true;
+        }),
+
+    body('isActive')
+        .optional()
+        .isBoolean().withMessage('isActive must be a boolean'),
+
+    body('storePermissions')
+        .optional()
+        .isArray().withMessage('storePermissions must be an array'),
+
+    body('storePermissions.*.connectionId')
+        .optional()
+        .isInt({ min: 1 }).withMessage('Each store permission must have a valid connectionId'),
+
+    body('storePermissions.*.canView')
+        .optional()
+        .isBoolean(),
+
+    body('storePermissions.*.canEdit')
+        .optional()
+        .isBoolean(),
+
+    body('warehousePermissions')
+        .optional()
+        .isArray().withMessage('warehousePermissions must be an array'),
+
+    body('warehousePermissions.*.warehouseId')
+        .optional()
+        .isInt({ min: 1 }).withMessage('Each warehouse permission must have a valid warehouseId'),
+
+    body('warehousePermissions.*.canView')
+        .optional()
+        .isBoolean(),
+
+    body('warehousePermissions.*.canEdit')
+        .optional()
+        .isBoolean(),
+];
+
+
 module.exports = {
     registerAdminValidator,
     loginValidator,
@@ -222,4 +312,5 @@ module.exports = {
     resetPasswordValidator,
     createSubAccountValidator,
     updateSubAccountValidator,
+    upsertSubAccountValidator,
 };

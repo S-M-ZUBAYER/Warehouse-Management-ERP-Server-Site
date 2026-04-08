@@ -6,6 +6,8 @@ const { sendSuccess, sendError } = require('../../utils/response');
 
 // ─── Admin Registration ───────────────────────────────────────────────────────
 const register = async (req, res, next) => {
+    console.log("call this api ");
+
     try {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
@@ -135,6 +137,24 @@ const updateSubAccount = async (req, res, next) => {
     }
 };
 
+const upsertSubAccount = async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return sendError(res, 'Validation failed', 400, errors.array().map(e => ({
+                field: e.path, message: e.msg,
+            })));
+        }
+        const result = await authService.upsertSubAccount(req.user, req.body);
+        return sendSuccess(res, result.message, result.data, result.status);
+    } catch (err) {
+        if (err.errors) {
+            return sendError(res, err.message, err.statusCode || 400, err.errors);
+        }
+        next(err);
+    }
+};
+
 const deleteSubAccount = async (req, res, next) => {
     try {
         await authService.deleteSubAccount(req.user, req.params.id);
@@ -154,5 +174,6 @@ module.exports = {
     createSubAccount,
     getSubAccountById,
     updateSubAccount,
+    upsertSubAccount,
     deleteSubAccount,
 };

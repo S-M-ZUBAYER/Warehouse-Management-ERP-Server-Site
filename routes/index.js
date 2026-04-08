@@ -9,6 +9,7 @@ router.use(apiLimiter);
 // ─── Active modules ───────────────────────────────────────────────────────────
 router.use('/auth', require('../modules/auth/auth.routes'));
 router.use('/users', require('../modules/users/users.routes'));
+router.use('/pages', require('../modules/Pages/Pages.routes'));
 router.use('/roles', require('../modules/roles/roles.routes'));
 router.use('/warehouses', require('../modules/warehouses/warehouses.routes'));
 router.use('/merchant-skus', require('../modules/merchantSkus/merchantSkus.routes'));

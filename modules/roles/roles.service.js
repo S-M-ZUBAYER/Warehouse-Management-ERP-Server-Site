@@ -16,23 +16,39 @@ const DEFAULT_PERMISSIONS = {
     product_management: {
         access: false,
         sub: {
-            merchant_sku: false,
+            product_list: false,
             combine_sku: false,
-            sku_mapping: false,
         },
     },
     inventory_management: {
         access: false,
         sub: {
             inventory_list: false,
-            inbound: false,
+            inbound: {
+                access: false,
+                sub: {
+                    inbound_draft: false,
+                    inbound_on_the_way: false,
+                    inbound_complete: false,
+                },
+            },
         },
     },
     order_management: {
         access: false,
         sub: {
-            all_orders: false,
-            manual_orders: false,
+            order_processing: {
+                access: false,
+                sub: {
+                    new_order: false,
+                    processed_order: false,
+                    shipped_order: false,
+                    completed_order: false,
+                    all_order: false,
+                    canceled_order: false,
+                },
+            },
+            manual_order: false,
         },
     },
     warehouse_management: {
@@ -42,28 +58,68 @@ const DEFAULT_PERMISSIONS = {
         access: false,
         sub: {
             store_authorization: false,
-            sub_account: false,
-            role_management: false,
+            account_management: {
+                access: false,
+                sub: {
+                    sub_account: false,
+                    role_management: false,
+                },
+            },
         },
     },
 };
 
 // Merge user-supplied permissions over defaults (so missing keys default to false)
+// const buildPermissions = (supplied = {}) => {
+//     const result = JSON.parse(JSON.stringify(DEFAULT_PERMISSIONS));
+//     for (const [page, val] of Object.entries(supplied)) {
+//         if (!result[page]) continue;
+//         if (typeof val.access === 'boolean') {
+//             result[page].access = val.access;
+//         }
+//         if (val.sub && result[page].sub) {
+//             for (const [subKey, subVal] of Object.entries(val.sub)) {
+//                 if (subKey in result[page].sub) {
+//                     result[page].sub[subKey] = Boolean(subVal);
+//                 }
+//             }
+//         }
+//     }
+//     return result;
+// };
+
 const buildPermissions = (supplied = {}) => {
     const result = JSON.parse(JSON.stringify(DEFAULT_PERMISSIONS));
-    for (const [page, val] of Object.entries(supplied)) {
-        if (!result[page]) continue;
-        if (typeof val.access === 'boolean') {
-            result[page].access = val.access;
+
+    const mergeRecursive = (target, source) => {
+        if (!source || typeof source !== 'object') return;
+
+        // Handle "access" property
+        if (typeof source.access === 'boolean') {
+            target.access = source.access;
         }
-        if (val.sub && result[page].sub) {
-            for (const [subKey, subVal] of Object.entries(val.sub)) {
-                if (subKey in result[page].sub) {
-                    result[page].sub[subKey] = Boolean(subVal);
+
+        // Handle "sub" property
+        if (source.sub && target.sub) {
+            for (const [key, value] of Object.entries(source.sub)) {
+                if (target.sub.hasOwnProperty(key)) {
+                    if (typeof value === 'object' && value !== null && typeof target.sub[key] === 'object') {
+                        mergeRecursive(target.sub[key], value);
+                    } else {
+                        target.sub[key] = Boolean(value);
+                    }
                 }
             }
         }
+    };
+
+    // ✅ Iterate over each top-level permission key
+    for (const [key, value] of Object.entries(supplied)) {
+        if (result.hasOwnProperty(key)) {
+            mergeRecursive(result[key], value);
+        }
     }
+
     return result;
 };
 
@@ -164,7 +220,7 @@ const createRole = async (user, data) => {
     }
 
     const { name, description, permissions, subAccountLinkingStatus } = data;
-
+    console.log(permissions, "permissions");
     // Check name unique within company
     const existing = await Role.findOne({
         where: { company_id: user.companyId, name: name.trim() },
@@ -341,9 +397,8 @@ const getPermissionTemplate = () => {
                 label: 'Product Management',
                 hasSub: true,
                 sub: [
-                    { key: 'merchant_sku', label: 'Merchant SKU' },
+                    { key: 'product_list', label: 'Product List' },
                     { key: 'combine_sku', label: 'Combine SKU' },
-                    { key: 'sku_mapping', label: 'SKU Mapping' },
                 ],
             },
             {
@@ -352,7 +407,16 @@ const getPermissionTemplate = () => {
                 hasSub: true,
                 sub: [
                     { key: 'inventory_list', label: 'Inventory List' },
-                    { key: 'inbound', label: 'Inbound' },
+                    {
+                        key: 'inbound',
+                        label: 'Inbound',
+                        hasSub: true, // Now has level-3 children
+                        sub: [
+                            { key: 'inbound_draft', label: 'Inbound Draft' },
+                            { key: 'inbound_on_the_way', label: 'Inbound On The Way' },
+                            { key: 'inbound_complete', label: 'Inbound Complete' },
+                        ]
+                    },
                 ],
             },
             {
@@ -360,8 +424,20 @@ const getPermissionTemplate = () => {
                 label: 'Order Management',
                 hasSub: true,
                 sub: [
-                    { key: 'all_orders', label: 'All Orders' },
-                    { key: 'manual_orders', label: 'Manual Orders' },
+                    {
+                        key: 'order_processing',
+                        label: 'Order Processing',
+                        hasSub: true, // Now has level-3 children
+                        sub: [
+                            { key: 'new_order', label: 'New Order' },
+                            { key: 'processed_order', label: 'Processed Order' },
+                            { key: 'shipped_order', label: 'Shipped Order' },
+                            { key: 'completed_order', label: 'Completed Order' },
+                            { key: 'all_order', label: 'All Orders' },
+                            { key: 'canceled_order', label: 'Canceled Order' },
+                        ]
+                    },
+                    { key: 'manual_order', label: 'Manual Order' },
                 ],
             },
             {
@@ -375,8 +451,15 @@ const getPermissionTemplate = () => {
                 hasSub: true,
                 sub: [
                     { key: 'store_authorization', label: 'Store Authorization' },
-                    { key: 'sub_account', label: 'Sub Account' },
-                    { key: 'role_management', label: 'Role Management' },
+                    {
+                        key: 'account_management',
+                        label: 'Account Management',
+                        hasSub: true,
+                        sub: [
+                            { key: 'sub_account', label: 'Sub Account' },
+                            { key: 'role_management', label: 'Role Management' },
+                        ]
+                    },
                 ],
             },
         ],

@@ -5,6 +5,7 @@ const { sequelize } = require('../config/database');
 const Company = require('./Company')(sequelize);
 const Role = require('./Role')(sequelize);
 const User = require('./User')(sequelize);
+const Pages = require('./Pages')(sequelize);
 const UserStorePermission = require('./UserStorePermission')(sequelize);
 const UserWarehousePermission = require('./UserWarehousePermission')(sequelize);
 const Warehouse = require('./Warehouse')(sequelize);
@@ -35,6 +36,7 @@ const models = {
     sequelize,
     Company,
     Role,
+    Pages,
     User,
     UserStorePermission,
     UserWarehousePermission,
