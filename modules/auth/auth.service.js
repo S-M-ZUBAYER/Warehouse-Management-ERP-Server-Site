@@ -371,6 +371,7 @@ const createSubAccount = async (adminUser, data) => {
 
     // Validate warehouse belongs to this company (skip if model not loaded yet)
     if (Warehouse) {
+
         const warehouse = await Warehouse.findOne({
             where: { id: warehouseId, company_id: adminUser.companyId },
         });
@@ -866,6 +867,7 @@ const patchSubAccount = async (adminUser, targetEmail, data) => {
 
 const upsertSubAccount = async (adminUser, data) => {
     const { email } = data;
+    console.log(data, "data");
 
     if (!email) {
         const err = new Error('Email is required');
@@ -942,7 +944,7 @@ const upsertSubAccount = async (adminUser, data) => {
             department: data.department || null,
             designation: data.designation || null,
             phone: data.phone || existingElsewhere.phone,
-            address: data.address || null,
+            address: data.address || existingElsewhere.address,
             is_active: data.isActive !== undefined ? data.isActive : true,
             avatar_url: data.avatar ? `data:image/jpeg;base64,${data.avatar}` : existingElsewhere.avatar_url,
             ...(data.password && { password: await hashPassword(data.password) }),

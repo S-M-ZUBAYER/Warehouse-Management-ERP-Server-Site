@@ -11,8 +11,24 @@ const cacheKey = (companyId, suffix = '') =>
 // Auto-generate warehouse code e.g. WH-001
 const generateWarehouseCode = async (companyId) => {
     const { Warehouse } = require('../../models');
-    const count = await Warehouse.count({ where: { company_id: companyId } });
-    return `WH-${String(count + 1).padStart(3, '0')}`;
+    const { Op } = require('sequelize');
+
+    // Find the highest existing code number for this company
+    const last = await Warehouse.findOne({
+        where: {
+            company_id: companyId,
+            code: { [Op.like]: 'WH-%' },
+        },
+        order: [['id', 'DESC']], // latest created = highest number
+        attributes: ['code'],
+    });
+
+    if (!last) return 'WH-001'; // first warehouse
+
+    // Extract number from "WH-001" → 1, increment → "WH-002"
+    const lastNum = parseInt(last.code.replace('WH-', ''), 10);
+    const nextNum = isNaN(lastNum) ? 1 : lastNum + 1;
+    return `WH-${String(nextNum).padStart(3, '0')}`;
 };
 
 // ─── Get All Warehouses ───────────────────────────────────────────────────────
@@ -95,15 +111,12 @@ const getWarehouseById = async (user, warehouseId) => {
 // ─── Create Warehouse ─────────────────────────────────────────────────────────
 const createWarehouse = async (user, data) => {
     const { Warehouse } = require('../../models');
+    const { name, attribute, managerName, phone, location, city, country, status } = data;
 
-    const {
-        name, attribute, managerName, phone,
-        location, city, country, status,
-    } = data;
-
-    // Check name unique within company
+    // ── Duplicate name check ──────────────────────────────────────────────
     const existing = await Warehouse.findOne({
         where: { company_id: user.companyId, name: name.trim() },
+        attributes: ['id'],   // only fetch id — fastest possible
     });
     if (existing) {
         const err = new Error('A warehouse with this name already exists');
@@ -111,14 +124,15 @@ const createWarehouse = async (user, data) => {
         throw err;
     }
 
-    const code = await generateWarehouseCode(user.companyId);
-
-    // First warehouse created is automatically set as default
+    // ── Single count for is_default ───────────────────────────────────────
     const warehouseCount = await Warehouse.count({
         where: { company_id: user.companyId },
     });
-    const isDefault = warehouseCount === 0;
 
+    // ── Code generation (no extra count query anymore) ────────────────────
+    const code = await generateWarehouseCode(user.companyId);
+
+    // ── Create ────────────────────────────────────────────────────────────
     const warehouse = await Warehouse.create({
         company_id: user.companyId,
         name: name.trim(),
@@ -129,12 +143,11 @@ const createWarehouse = async (user, data) => {
         location: location || null,
         city: city || null,
         country: country || null,
-        is_default: isDefault,
+        is_default: warehouseCount === 0,
         status: status || 'active',
     });
 
     await redis.flushByPattern(cacheKey(user.companyId, '*'));
-
     return warehouse;
 };
 

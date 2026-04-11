@@ -23,11 +23,11 @@ const createCombineSkuValidator = [
     body('height').optional().isDecimal({ decimal_digits: '0,2' }),
 
     body('warehouseId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Invalid warehouse ID'),
 
     body('status')
-        .optional()
+        .optional({ values: 'falsy' })
         .isIn(['active', 'inactive']),
 
     // items: [{ merchantSkuId: 1, quantity: 2 }, ...]

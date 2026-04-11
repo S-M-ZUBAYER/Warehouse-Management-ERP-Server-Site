@@ -15,7 +15,7 @@ const pageNodeShape = (prefix = '') => [
         .isLength({ max: 150 }).withMessage('Label max 150 characters'),
 
     body(`${prefix}hasSub`)
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean().withMessage('hasSub must be a boolean'),
 ];
 
@@ -36,16 +36,16 @@ const seedPagesValidator = [
         .isLength({ max: 150 }),
 
     body('pages.*.hasSub')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean().withMessage('hasSub must be a boolean'),
 
     // Sub-level 1
     body('pages.*.sub')
-        .optional()
+        .optional({ values: 'falsy' })
         .isArray().withMessage('sub must be an array'),
 
     body('pages.*.sub.*.key')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .notEmpty()
         .isLength({ min: 1, max: 100 })
@@ -57,16 +57,16 @@ const seedPagesValidator = [
         .isLength({ max: 150 }),
 
     body('pages.*.sub.*.hasSub')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 
     // Sub-level 2 (sub-sub)
     body('pages.*.sub.*.sub')
-        .optional()
+        .optional({ values: 'falsy' })
         .isArray().withMessage('sub.sub must be an array'),
 
     body('pages.*.sub.*.sub.*.key')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .notEmpty()
         .isLength({ min: 1, max: 100 })
@@ -81,7 +81,7 @@ const seedPagesValidator = [
 // ── Update single page validator ───────────────────────────────────────────────
 const updatePageValidator = [
     body('key')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ min: 1, max: 100 })
         .matches(/^[a-z0-9_]+$/).withMessage('Key must be lowercase, numbers, or underscores'),
@@ -92,15 +92,15 @@ const updatePageValidator = [
         .isLength({ max: 150 }),
 
     body('hasSub')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean().withMessage('hasSub must be a boolean'),
 
     body('order')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 0 }).withMessage('Order must be a non-negative integer'),
 
     body('isActive')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean().withMessage('isActive must be a boolean'),
 ];
 

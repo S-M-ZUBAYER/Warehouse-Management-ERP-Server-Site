@@ -106,7 +106,7 @@ module.exports = {
                     type: 'boolean', example: true,
                     description: 'Defaults to true on create. Setting false on update kills the user Redis session immediately.',
                 },
-                avatar: { type: 'string', description: 'Base64 encoded JPEG/PNG image.' },
+                avatar: { type: 'string', example: 'Base64 encoded JPEG/PNG image.' },
                 storePermissions: {
                     type: 'array',
                     description: 'Full replace on update — omit to leave unchanged, send [] to clear all.',
@@ -260,6 +260,7 @@ module.exports = {
                                         department: 'Operations',
                                         designation: 'Warehouse Manager',
                                         phone: '+60123456789',
+                                        avatar: 'Base64_String',
                                         storePermissions: [{ connectionId: 1, canView: true, canEdit: false }],
                                         warehousePermissions: [{ warehouseId: 1, canView: true, canEdit: true }],
                                     },

@@ -17,7 +17,7 @@ module.exports = (sequelize) => {
             allowNull: false,
         },
         code: {
-            type: DataTypes.STRING(20),
+            type: DataTypes.STRING(150),
             allowNull: false,
             comment: 'Short code e.g. WH-A',
         },

@@ -13,7 +13,7 @@ const createMerchantSkuValidator = [
         .isLength({ min: 2, max: 255 }).withMessage('SKU title max 255 characters'),
 
     body('warehouseId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Invalid warehouse ID'),
 
     body('gtin')
@@ -23,38 +23,38 @@ const createMerchantSkuValidator = [
         .optional().trim(),
 
     body('weight')
-        .optional()
+        .optional({ values: 'falsy' })
         .isDecimal({ decimal_digits: '0,2' }).withMessage('Weight must be a decimal'),
 
     body('length')
-        .optional()
+        .optional({ values: 'falsy' })
         .isDecimal({ decimal_digits: '0,2' }).withMessage('Length must be a decimal'),
 
     body('width')
-        .optional()
+        .optional({ values: 'falsy' })
         .isDecimal({ decimal_digits: '0,2' }).withMessage('Width must be a decimal'),
 
     body('height')
-        .optional()
+        .optional({ values: 'falsy' })
         .isDecimal({ decimal_digits: '0,2' }).withMessage('Height must be a decimal'),
 
     body('price')
-        .optional()
+        .optional({ values: 'falsy' })
         .isDecimal({ decimal_digits: '0,2' }).withMessage('Price must be a decimal'),
 
     body('costPrice')
-        .optional()
+        .optional({ values: 'falsy' })
         .isDecimal({ decimal_digits: '0,2' }).withMessage('Cost price must be a decimal'),
 
     body('country')
         .optional().trim().isLength({ max: 100 }),
 
     body('status')
-        .optional()
+        .optional({ values: 'falsy' })
         .isIn(['active', 'inactive']).withMessage('Status must be active or inactive'),
 
     body('image')
-        .optional()
+        .optional({ values: 'falsy' })
         .custom((val) => {
             if (val && typeof val !== 'string') throw new Error('Image must be a base64 string');
             return true;
@@ -67,7 +67,7 @@ const updateMerchantSkuValidator = [
         .isLength({ min: 2, max: 255 }),
 
     body('warehouseId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }),
 
     body('gtin').optional().trim(),
@@ -82,11 +82,11 @@ const updateMerchantSkuValidator = [
     body('country').optional().trim(),
 
     body('status')
-        .optional()
+        .optional({ values: 'falsy' })
         .isIn(['active', 'inactive']),
 
     body('image')
-        .optional()
+        .optional({ values: 'falsy' })
         .custom((val) => {
             if (val && typeof val !== 'string') throw new Error('Image must be a base64 string');
             return true;

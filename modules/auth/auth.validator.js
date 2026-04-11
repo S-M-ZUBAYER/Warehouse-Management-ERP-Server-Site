@@ -112,105 +112,105 @@ const createSubAccountValidator = [
         .isInt({ min: 1 }).withMessage('Invalid warehouse ID'),
 
     body('department')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ max: 100 }).withMessage('Department max 100 characters'),
 
     body('designation')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ max: 100 }).withMessage('Designation max 100 characters'),
 
     body('phone')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isMobilePhone().withMessage('Invalid phone number'),
 
     body('address')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ max: 255 }).withMessage('Address max 255 characters'),
 
     body('avatar')
-        .optional()
+        .optional({ values: 'falsy' })
         .custom((val) => { if (val && typeof val !== 'string') throw new Error('Avatar must be a string'); return true; }),
 
     // Store permissions: array of connection IDs
     body('storePermissions')
-        .optional()
+        .optional({ values: 'falsy' })
         .isArray().withMessage('Store permissions must be an array'),
 
     body('storePermissions.*.connectionId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Invalid connection ID'),
 
     body('storePermissions.*.canView')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 
     body('storePermissions.*.canEdit')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 
     // Warehouse permissions: array of warehouse IDs
     body('warehousePermissions')
-        .optional()
+        .optional({ values: 'falsy' })
         .isArray().withMessage('Warehouse permissions must be an array'),
 
     body('warehousePermissions.*.warehouseId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Invalid warehouse ID'),
 
     body('warehousePermissions.*.canView')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 
     body('warehousePermissions.*.canEdit')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 ];
 
 const updateSubAccountValidator = [
     body('name')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ min: 2, max: 100 }).withMessage('Name must be 2–100 characters'),
 
     body('roleId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Invalid role ID'),
 
     body('department')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim(),
 
     body('designation')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim(),
 
     body('phone')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isMobilePhone().withMessage('Invalid phone number'),
 
     body('address')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim(),
 
     body('avatar')
-        .optional()
+        .optional({ values: 'falsy' })
         .custom((val) => { if (val && typeof val !== 'string') throw new Error('Avatar must be a string'); return true; }),
 
     body('isActive')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 
     body('storePermissions')
-        .optional()
+        .optional({ values: 'falsy' })
         .isArray(),
 
     body('warehousePermissions')
-        .optional()
+        .optional({ values: 'falsy' })
         .isArray(),
 ];
 
@@ -221,85 +221,85 @@ const upsertSubAccountValidator = [
         .normalizeEmail(),
 
     body('accountId')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ min: 1, max: 50 }).withMessage('Account ID must be 1–50 characters'),
 
     body('name')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ min: 2, max: 100 }).withMessage('Name must be 2–100 characters'),
 
     body('password')
-        .optional()
+        .optional({ values: 'falsy' })
         .isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
 
     body('roleId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Invalid role ID'),
 
     body('warehouseId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Invalid warehouse ID'),
 
     body('department')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim(),
 
     body('designation')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim(),
 
     body('phone')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isMobilePhone().withMessage('Invalid phone number'),
 
     body('address')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim(),
 
     body('avatar')
-        .optional()
+        .optional({ values: 'falsy' })
         .custom((val) => {
             if (val && typeof val !== 'string') throw new Error('Avatar must be a base64 string');
             return true;
         }),
 
     body('isActive')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean().withMessage('isActive must be a boolean'),
 
     body('storePermissions')
-        .optional()
+        .optional({ values: 'falsy' })
         .isArray().withMessage('storePermissions must be an array'),
 
     body('storePermissions.*.connectionId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Each store permission must have a valid connectionId'),
 
     body('storePermissions.*.canView')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 
     body('storePermissions.*.canEdit')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 
     body('warehousePermissions')
-        .optional()
+        .optional({ values: 'falsy' })
         .isArray().withMessage('warehousePermissions must be an array'),
 
     body('warehousePermissions.*.warehouseId')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Each warehouse permission must have a valid warehouseId'),
 
     body('warehousePermissions.*.canView')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 
     body('warehousePermissions.*.canEdit')
-        .optional()
+        .optional({ values: 'falsy' })
         .isBoolean(),
 ];
 

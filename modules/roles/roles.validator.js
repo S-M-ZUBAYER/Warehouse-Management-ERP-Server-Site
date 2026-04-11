@@ -18,81 +18,81 @@ const createRoleValidator = [
         .isLength({ min: 2, max: 100 }).withMessage('Role name must be 2–100 characters'),
 
     body('description')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ max: 500 }).withMessage('Description max 500 characters'),
 
     // permissions: object with page keys
     // e.g. { dashboard: { access: true }, product_management: { access: true, sub: { merchant_sku: true } } }
     body('permissions')
-        .optional()
+        .optional({ values: 'falsy' })
         .isObject().withMessage('Permissions must be an object'),
 
     body('permissions.dashboard')
-        .optional()
+        .optional({ values: 'falsy' })
         .isObject().withMessage('dashboard permission must be an object'),
 
     body('permissions.product_management')
-        .optional()
+        .optional({ values: 'falsy' })
         .isObject().withMessage('product_management permission must be an object'),
 
     body('permissions.inventory_management')
-        .optional()
+        .optional({ values: 'falsy' })
         .isObject().withMessage('inventory_management permission must be an object'),
 
     body('permissions.order_management')
-        .optional()
+        .optional({ values: 'falsy' })
         .isObject().withMessage('order_management permission must be an object'),
 
     body('permissions.warehouse_management')
-        .optional()
+        .optional({ values: 'falsy' })
         .isObject().withMessage('warehouse_management permission must be an object'),
 
     body('permissions.system_configuration')
-        .optional()
+        .optional({ values: 'falsy' })
         .isObject().withMessage('system_configuration permission must be an object'),
 
     body('subAccountLinkingStatus')
-        .optional()
+        .optional({ values: 'falsy' })
         .isIn(['linked', 'not_linked']).withMessage('subAccountLinkingStatus must be linked or not_linked'),
 ];
 
 const updateRoleValidator = [
     body('name')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ min: 2, max: 100 }).withMessage('Role name must be 2–100 characters'),
 
     body('description')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ max: 500 }).withMessage('Description max 500 characters'),
 
     body('permissions')
-        .optional()
+        .optional({ values: 'falsy' })
         .isObject().withMessage('Permissions must be an object'),
 
     body('subAccountLinkingStatus')
-        .optional()
+        .optional({ values: 'falsy' })
         .isIn(['linked', 'not_linked']).withMessage('subAccountLinkingStatus must be linked or not_linked'),
 ];
 
 const listRolesValidator = [
     query('page')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1 }).withMessage('Page must be a positive integer'),
 
     query('limit')
-        .optional()
+        .optional({ values: 'falsy' })
         .isInt({ min: 1, max: 100 }).withMessage('Limit must be 1–100'),
 
     query('search')
-        .optional()
+        .optional({ values: 'falsy' })
         .trim()
         .isLength({ max: 100 }),
 
     query('subAccountLinkingStatus')
-        .optional()
+        .optional({ values: 'falsy' })
         .isIn(['linked', 'not_linked']).withMessage('Invalid linking status filter'),
 ];
 
