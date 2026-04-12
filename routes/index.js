@@ -15,6 +15,20 @@ router.use('/warehouses', require('../modules/warehouses/warehouses.routes'));
 router.use('/merchant-skus', require('../modules/merchantSkus/merchantSkus.routes'));
 router.use('/combine-skus', require('../modules/combineskus/combineskus.routes'));
 
+// ── Inventory: SKU management ─────────────────────────────────────────────────
+// router.use('/merchant-skus', require('../modules/merchant-skus/merchantSkus.routes'));
+// router.use('/combine-skus', require('../modules/combine-skus/combineskus.routes'));
+
+// ── Inventory: Inbound shipments ──────────────────────────────────────────────
+router.use('/inbound', require('../modules/inbound/inbound.routes'));
+
+// ── Inventory: Stock management + deduction API ───────────────────────────────
+router.use('/stock', require('../modules/stock/stock.routes'));
+
+// ── Platform integration ──────────────────────────────────────────────────────
+router.use('/platform-stores', require('../modules/platformStores/platformStores.routes'));
+router.use('/platform-sku-mappings', require('../modules/platformSkuMappings/platformSkuMappings.routes'));
+
 // TODO: Uncomment as you build each module
 // router.use('/companies',    require('../modules/companies/companies.routes'));
 // router.use('/roles',        require('../modules/roles/roles.routes'));

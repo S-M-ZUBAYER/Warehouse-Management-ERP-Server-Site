@@ -9,9 +9,25 @@ const Pages = require('./Pages')(sequelize);
 const UserStorePermission = require('./UserStorePermission')(sequelize);
 const UserWarehousePermission = require('./UserWarehousePermission')(sequelize);
 const Warehouse = require('./Warehouse')(sequelize);
-const MerchantSku = require('./MerchantSku')(sequelize);
-const CombineSku = require('./CombineSku')(sequelize);
+
+// ── Inventory: SKU management ─────────────────────────────────────────────────
+// Use the updated versions that include the new associations
+const MerchantSku = require('./MerchantSku')(sequelize);       // updated version
+const CombineSku = require('./CombineSku')(sequelize);        // updated version
 const CombineSkuItem = require('./CombineSkuItem')(sequelize);
+
+// ── Inventory: Stock ──────────────────────────────────────────────────────────
+const SkuWarehouseStock = require('./SkuWarehouseStock')(sequelize);   // NEW
+const StockLedgerEntry = require('./StockLedgerEntry')(sequelize);    // NEW
+
+// ── Inventory: Inbound ────────────────────────────────────────────────────────
+const InboundOrder = require('./InboundOrder')(sequelize);        // NEW
+const InboundOrderLine = require('./InboundOrderLine')(sequelize);    // NEW
+
+// ── Platform integration ──────────────────────────────────────────────────────
+const PlatformStore = require('./PlatformStore')(sequelize);       // NEW
+const PlatformSkuMapping = require('./PlatformSkuMapping')(sequelize);  // NEW
+const OrderSaleLine = require('./OrderSaleLine')(sequelize);       // NEW
 
 // TODO: Uncomment as you build each module
 // const WarehouseZone         = require('./WarehouseZone')(sequelize);
@@ -41,9 +57,24 @@ const models = {
     UserStorePermission,
     UserWarehousePermission,
     Warehouse,
+
+    // SKU management
     MerchantSku,
     CombineSku,
     CombineSkuItem,
+
+    // Stock
+    SkuWarehouseStock,
+    StockLedgerEntry,
+
+    // Inbound
+    InboundOrder,
+    InboundOrderLine,
+
+    // Platform
+    PlatformStore,
+    PlatformSkuMapping,
+    OrderSaleLine,
     // Add here as you uncomment above
 };
 

@@ -554,3 +554,347 @@ This project is licensed under the MIT License.
 <div align="center">
   <sub>Built with ❤️ for scalable multi-tenant ERP</sub>
 </div>
+
+# WMS Backend — Node.js Complete Reference (Inventory Management part)
+
+## File Structure
+
+```
+project/
+├── migrations/
+│   ├── 006_create_merchant_skus.sql          ← product catalogue
+│   ├── 007_create_combine_skus.sql           ← bundle SKUs + computed_quantity
+│   ├── 008_create_combine_sku_items.sql      ← bundle composition (child SKUs + ratios)
+│   ├── 009_create_sku_warehouse_stock.sql    ← real-time stock per SKU per warehouse
+│   ├── 010_create_stock_ledger_entries.sql   ← immutable audit log (append-only)
+│   ├── 011_create_inbound_orders.sql         ← inbound shipment lifecycle
+│   ├── 012_create_inbound_order_lines.sql    ← per-SKU lines within an inbound
+│   ├── 013_create_platform_stores.sql        ← Shopee/TikTok/Lazada store connections
+│   ├── 014_create_platform_sku_mappings.sql  ← bridge: internal SKU ↔ platform listing
+│   └── 015_create_order_sale_lines.sql       ← sale events + idempotency guard
+│
+├── models/
+│   ├── MerchantSku.js          ← REPLACE with MerchantSku_updated.js (adds stock associations)
+│   ├── CombineSku.js           ← REPLACE with CombineSku_updated.js  (adds computed_quantity)
+│   ├── CombineSkuItem.js       ← unchanged from your original
+│   ├── SkuWarehouseStock.js    ← NEW
+│   ├── StockLedgerEntry.js     ← NEW
+│   ├── InboundOrder.js         ← NEW
+│   ├── InboundOrderLine.js     ← NEW
+│   ├── PlatformStore.js        ← NEW
+│   ├── PlatformSkuMapping.js   ← NEW
+│   └── OrderSaleLine.js        ← NEW
+│
+├── modules/
+│   ├── merchant-skus/
+│   │   ├── merchantSkus.controller.js    ← unchanged
+│   │   ├── merchantSkus.routes.js        ← unchanged
+│   │   ├── merchantSkus.service.js       ← REPLACE with merchantSkus_service_updated.js
+│   │   └── merchantSkus.validator.js     ← unchanged
+│   │
+│   ├── combine-skus/
+│   │   ├── combineskus.controller.js     ← unchanged
+│   │   ├── combineskus.routes.js         ← unchanged
+│   │   ├── combineskus.service.js        ← REPLACE with combineskus_service_updated.js
+│   │   └── combineskus.validator.js      ← unchanged
+│   │
+│   ├── inbound/                          ← NEW module
+│   │   ├── inbound.controller.js
+│   │   ├── inbound.routes.js
+│   │   ├── inbound.service.js
+│   │   └── inbound.validator.js
+│   │
+│   ├── stock/                            ← NEW module
+│   │   ├── stock.controller.js
+│   │   ├── stock.routes.js
+│   │   └── stock.service.js
+│   │
+│   ├── platform-stores/                  ← NEW module
+│   │   ├── platformStores.controller.js
+│   │   ├── platformStores.routes.js
+│   │   └── platformStores.service.js
+│   │
+│   ├── platform-sku-mappings/            ← NEW module
+│   │   ├── platformSkuMappings.controller.js
+│   │   ├── platformSkuMappings.routes.js
+│   │   └── platformSkuMappings.service.js
+│   │
+│   └── swagger/
+│       ├── merchant-skus_paths.js        ← your original
+│       ├── combine-skus_paths.js         ← your original
+│       ├── inbound_paths.js              ← NEW
+│       └── stock_platform_paths.js       ← NEW (stock + platformStores + platformSkuMappings)
+│
+├── workers/
+│   └── combinedSkuRecomputeWorker.js     ← NEW background process
+│
+└── routes/
+    └── index.js                          ← NEW central router (routes_index.js)
+```
+
+---
+
+## Migration Order
+
+Run in this exact sequence (tables reference each other via FK):
+
+```bash
+mysql -u root -p your_db < migrations/006_create_merchant_skus.sql
+mysql -u root -p your_db < migrations/007_create_combine_skus.sql
+mysql -u root -p your_db < migrations/008_create_combine_sku_items.sql
+mysql -u root -p your_db < migrations/009_create_sku_warehouse_stock.sql
+mysql -u root -p your_db < migrations/010_create_stock_ledger_entries.sql
+mysql -u root -p your_db < migrations/011_create_inbound_orders.sql
+mysql -u root -p your_db < migrations/012_create_inbound_order_lines.sql
+mysql -u root -p your_db < migrations/013_create_platform_stores.sql
+mysql -u root -p your_db < migrations/014_create_platform_sku_mappings.sql
+mysql -u root -p your_db < migrations/015_create_order_sale_lines.sql
+```
+
+---
+
+## Wire up routes in app.js
+
+```js
+// app.js
+app.use("/api/v1", require("./routes/index"));
+```
+
+---
+
+## Start the recompute worker
+
+Run as a **separate process** alongside your Express server:
+
+```bash
+node workers/combinedSkuRecomputeWorker.js
+```
+
+With PM2:
+
+```js
+// ecosystem.config.js
+module.exports = {
+  apps: [
+    { name: "wms-api", script: "app.js" },
+    { name: "sku-worker", script: "workers/combinedSkuRecomputeWorker.js" },
+  ],
+};
+```
+
+---
+
+## Complete API Reference
+
+### Merchant SKUs
+
+| Method | Endpoint                        | Role                |
+| ------ | ------------------------------- | ------------------- |
+| GET    | /api/v1/merchant-skus/dropdowns | all                 |
+| GET    | /api/v1/merchant-skus           | all                 |
+| GET    | /api/v1/merchant-skus/:id       | all                 |
+| POST   | /api/v1/merchant-skus           | owner/admin/manager |
+| PUT    | /api/v1/merchant-skus/:id       | owner/admin/manager |
+| DELETE | /api/v1/merchant-skus/:id       | owner/admin/manager |
+| DELETE | /api/v1/merchant-skus/bulk      | owner/admin/manager |
+
+### Combine SKUs
+
+| Method | Endpoint                    | Role                |
+| ------ | --------------------------- | ------------------- |
+| GET    | /api/v1/combine-skus/picker | all                 |
+| GET    | /api/v1/combine-skus        | all                 |
+| GET    | /api/v1/combine-skus/:id    | all                 |
+| POST   | /api/v1/combine-skus        | owner/admin/manager |
+| PUT    | /api/v1/combine-skus/:id    | owner/admin/manager |
+| DELETE | /api/v1/combine-skus/:id    | owner/admin/manager |
+
+### Inbound
+
+| Method | Endpoint                    | Description                                 |
+| ------ | --------------------------- | ------------------------------------------- |
+| GET    | /api/v1/inbound/dropdowns   | warehouses + currencies                     |
+| GET    | /api/v1/inbound/picker      | SKU search for adding lines                 |
+| GET    | /api/v1/inbound             | list with filters                           |
+| GET    | /api/v1/inbound/:id         | single detail                               |
+| POST   | /api/v1/inbound             | create draft                                |
+| PUT    | /api/v1/inbound/:id         | update draft fields/lines                   |
+| PUT    | /api/v1/inbound/:id/ship    | draft → on_the_way, increments qty_inbound  |
+| PUT    | /api/v1/inbound/:id/receive | on_the_way → completed, atomic stock update |
+| PUT    | /api/v1/inbound/:id/cancel  | cancel + reverse qty_inbound                |
+
+### Stock
+
+| Method | Endpoint                              | Description                                  |
+| ------ | ------------------------------------- | -------------------------------------------- |
+| GET    | /api/v1/stock/merchant/:merchantSkuId | stock by SKU (all warehouses)                |
+| GET    | /api/v1/stock/combine/:combineSkuId   | combine SKU with child stock                 |
+| POST   | /api/v1/stock/bulk                    | bulk stock query (Java startup sync)         |
+| POST   | /api/v1/stock/adjust                  | manual adjustment (admin only)               |
+| POST   | /api/v1/stock/deduct                  | **Java-facing deduction after sale webhook** |
+| GET    | /api/v1/stock/ledger                  | audit log (paginated)                        |
+
+### Platform Stores
+
+| Method | Endpoint                           | Description                                 |
+| ------ | ---------------------------------- | ------------------------------------------- |
+| GET    | /api/v1/platform-stores            | list connected stores                       |
+| GET    | /api/v1/platform-stores/:id        | single store                                |
+| POST   | /api/v1/platform-stores            | connect new store                           |
+| PUT    | /api/v1/platform-stores/:id        | update settings                             |
+| PUT    | /api/v1/platform-stores/:id/tokens | **Java: update OAuth tokens after refresh** |
+| DELETE | /api/v1/platform-stores/:id        | disconnect                                  |
+
+### Platform SKU Mappings
+
+| Method | Endpoint                                        | Description                               |
+| ------ | ----------------------------------------------- | ----------------------------------------- |
+| GET    | /api/v1/platform-sku-mappings/pending-sync      | **Java polls for products to push**       |
+| GET    | /api/v1/platform-sku-mappings                   | list all mappings                         |
+| GET    | /api/v1/platform-sku-mappings/:id               | single mapping                            |
+| POST   | /api/v1/platform-sku-mappings                   | create mapping                            |
+| PUT    | /api/v1/platform-sku-mappings/:id               | update warehouse / active flag            |
+| PUT    | /api/v1/platform-sku-mappings/:id/sync-callback | **Java writes back platform listing IDs** |
+| DELETE | /api/v1/platform-sku-mappings/:id               | remove mapping                            |
+
+---
+
+## Java Integration Contract
+
+The Java Spring Boot team needs exactly these 5 endpoints. Give them this reference:
+
+### 1. Product push — what to push and where to find it
+
+```
+GET /api/v1/platform-sku-mappings/pending-sync?platform=shopee
+```
+
+Returns up to 100 mappings with `sync_status` of `pending`, `out_of_sync`, or `failed`.
+Each record includes the full merchant SKU or combine SKU payload (name, title, price, weight, dimensions, image).
+
+After successfully pushing to the platform, Java calls:
+
+```
+PUT /api/v1/platform-sku-mappings/:id/sync-callback
+Body: { success: true, platformSkuId: "...", platformListingId: "...", platformModelId: "..." }
+```
+
+On failure:
+
+```
+Body: { success: false, errorMessage: "Rate limit exceeded" }
+```
+
+### 2. Stock query before sync
+
+```
+POST /api/v1/stock/bulk
+Body: { merchantSkuIds: [1,2,3], combineSkuIds: [1] }
+```
+
+Returns a map of SKU ID → `{ qty_on_hand, qty_reserved, qty_inbound, qty_available }`.
+Java uses `qty_available` as the number to push to the platform listing.
+
+### 3. Stock deduction after sale webhook
+
+```
+POST /api/v1/stock/deduct
+Body: {
+  platformMappingId: 5,
+  platformOrderId: "SHOPEE-ORD-12345",
+  platformOrderItemId: "SHOPEE-ITEM-001",   ← optional, for item-level idempotency
+  quantitySold: 2
+}
+```
+
+**Idempotent** — safe to retry. Returns `alreadyDeducted: true` if already processed.
+For combine SKUs, automatically deducts each child SKU proportionally (quantity × ratio).
+
+Response includes updated stock numbers:
+
+```json
+{
+  "alreadyDeducted": false,
+  "deductions": [
+    { "merchantSkuId": 3, "newQtyOnHand": 148 },
+    { "merchantSkuId": 7, "newQtyOnHand": 96 }
+  ],
+  "combineSkuId": 2
+}
+```
+
+Java uses `newQtyOnHand - qty_reserved` to push the updated available qty back to the platform listing.
+
+### 4. OAuth token storage
+
+```
+PUT /api/v1/platform-stores/:id/tokens
+Body: { accessToken: "...", refreshToken: "...", tokenExpiresAt: "2024-03-01T00:00:00Z" }
+```
+
+Node.js stores tokens. Java reads them from `GET /api/v1/platform-stores` when making platform API calls.
+
+### 5. Mark out of sync (optional but recommended)
+
+When Java detects stock drift or a product update on the Node.js side, call `sync-callback`
+with `success: false` to trigger `sync_status: out_of_sync` — Node.js will include it
+in the next `pending-sync` response for re-push.
+
+---
+
+## Key Business Rules
+
+### Combined SKU quantity formula
+
+```sql
+computed_quantity = MIN( FLOOR(qty_on_hand / item.quantity) )
+-- across all child SKUs in combine_sku_items
+-- e.g. SKU-A has 100 units, ratio=2; SKU-B has 60 units, ratio=1
+--   → MIN(FLOOR(100/2), FLOOR(60/1)) = MIN(50, 60) = 50
+```
+
+This runs:
+
+- After every inbound receipt (via Redis worker)
+- After every stock deduction (via Redis worker)
+- After every manual adjustment (via Redis worker)
+- Inline after create/update of a combine SKU
+
+### Stock deduction for combine SKUs
+
+When 1 unit of a combine SKU is sold:
+
+- Each child SKU is deducted by `quantity_sold × item.quantity`
+- All deductions happen in a single MySQL transaction
+- The combine SKU's `computed_quantity` is recomputed after commit
+
+### Inbound lifecycle
+
+```
+draft  →  [ship]  →  on_the_way  →  [receive]  →  completed
+  ↓                      ↓
+[cancel]              [cancel] (reverses qty_inbound)
+```
+
+- At `ship`: `qty_inbound += qty_expected` for each line
+- At `receive`: `qty_on_hand += qty_received`, `qty_inbound -= qty_expected`
+- Partial receipt is allowed (qty_received < qty_expected → `has_discrepancy = true`)
+- Both ops are fully atomic MySQL transactions
+
+### Delete guards
+
+- Cannot delete a merchant SKU if it is part of any combine SKU
+- Cannot delete a merchant SKU if `qty_on_hand > 0`
+- Cannot delete a platform store if it has active SKU mappings
+
+---
+
+## Redis Queue Keys
+
+| Key                                          | Purpose                                           |
+| -------------------------------------------- | ------------------------------------------------- |
+| `queue:combine_sku_recompute`                | Jobs for background combine SKU qty recomputation |
+| `company:{id}:cache:merchant_skus:*`         | Merchant SKU list cache (60s TTL pattern)         |
+| `company:{id}:cache:combine_skus:*`          | Combine SKU list cache                            |
+| `company:{id}:cache:platform_stores:*`       | Platform store cache                              |
+| `company:{id}:cache:platform_sku_mappings:*` | Mapping cache                                     |

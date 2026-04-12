@@ -9,6 +9,10 @@ const rolesModule = require('./paths/roles.paths');
 const warehousesModule = require('./paths/warehouses.paths');
 const merchantSkuModule = require('./paths/merchant-skus.paths');
 const combineSkuModule = require('./paths/combine-skus.paths');
+const inboundModule = require('./paths/inbound.paths');
+const stockModule = require('./paths/stock.paths');
+const platformStoreModule = require('./paths/platform_stores.paths');
+const platformSkuMappingModule = require('./paths/platform_sku_mappings.paths');
 // ✅ Adding a new module = one import line + one entry in the array below
 
 const modules = [
@@ -19,6 +23,10 @@ const modules = [
     warehousesModule,
     merchantSkuModule,
     combineSkuModule,
+    inboundModule,
+    stockModule,
+    platformStoreModule,
+    platformSkuMappingModule
 ];
 
 // ── Auto-merge all modules into base ─────────────────────────────────
