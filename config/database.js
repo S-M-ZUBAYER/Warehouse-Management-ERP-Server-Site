@@ -28,6 +28,8 @@ const sequelize = new Sequelize(
 const connectDB = async () => {
     try {
         await sequelize.authenticate();
+        // Set max_allowed_packet for this session
+        await sequelize.query("SET GLOBAL max_allowed_packet = 67108864");
         console.log(`✅ MySQL connected → ${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME}`);
     } catch (error) {
         console.error('❌ Database connection failed:', error.message);

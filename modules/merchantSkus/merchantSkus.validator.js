@@ -24,27 +24,27 @@ const createMerchantSkuValidator = [
 
     body('weight')
         .optional({ values: 'falsy' })
-        .isDecimal({ decimal_digits: '0,2' }).withMessage('Weight must be a decimal'),
+        .isFloat({ min: 0 }).withMessage('Weight must be a valid number'),
 
     body('length')
         .optional({ values: 'falsy' })
-        .isDecimal({ decimal_digits: '0,2' }).withMessage('Length must be a decimal'),
+        .isFloat({ min: 0 }).withMessage('Length must be a valid number'),
 
     body('width')
         .optional({ values: 'falsy' })
-        .isDecimal({ decimal_digits: '0,2' }).withMessage('Width must be a decimal'),
+        .isFloat({ min: 0 }).withMessage('Width must be a valid number'),
 
     body('height')
         .optional({ values: 'falsy' })
-        .isDecimal({ decimal_digits: '0,2' }).withMessage('Height must be a decimal'),
+        .isFloat({ min: 0 }).withMessage('Height must be a valid number'),
 
     body('price')
         .optional({ values: 'falsy' })
-        .isDecimal({ decimal_digits: '0,2' }).withMessage('Price must be a decimal'),
+        .isFloat({ min: 0 }).withMessage('Price must be a valid number'),
 
     body('costPrice')
         .optional({ values: 'falsy' })
-        .isDecimal({ decimal_digits: '0,2' }).withMessage('Cost price must be a decimal'),
+        .isFloat({ min: 0 }).withMessage('Cost price must be a valid number'),
 
     body('country')
         .optional().trim().isLength({ max: 100 }),
@@ -68,7 +68,8 @@ const updateMerchantSkuValidator = [
 
     body('warehouseId')
         .optional({ values: 'falsy' })
-        .isInt({ min: 1 }),
+        .isInt({ min: 1 }).withMessage('Invalid warehouse ID')
+        .toInt(),
 
     body('gtin').optional().trim(),
     body('productDetails').optional().trim(),

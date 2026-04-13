@@ -176,6 +176,7 @@ const createMerchantSku = async (user, data) => {
         country, status, image,
     } = data;
 
+
     // Check SKU name unique within company
     const existing = await MerchantSku.findOne({
         where: { company_id: user.companyId, sku_name: skuName.trim().toUpperCase() },
@@ -196,8 +197,21 @@ const createMerchantSku = async (user, data) => {
         }
     }
 
+    // let imageUrl = null;
+    // if (image) imageUrl = `data:image/jpeg;base64,${image}`;
     let imageUrl = null;
-    if (image) imageUrl = `data:image/jpeg;base64,${image}`;
+    if (image) {
+        // Detect mime type from base64 header
+        const mimeMatch = image.match(/^data:(image\/[a-zA-Z]+);base64,/);
+        if (mimeMatch) {
+            // image already has data URI prefix
+            imageUrl = image;
+        } else {
+            // raw base64, detect from magic bytes
+            const mime = image.charAt(0) === '/' ? 'image/jpeg' : 'image/png';
+            imageUrl = `data:${mime};base64,${image}`;
+        }
+    }
 
     const result = await sequelize.transaction(async (t) => {
         const sku = await MerchantSku.create({

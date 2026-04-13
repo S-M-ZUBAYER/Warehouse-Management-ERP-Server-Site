@@ -108,7 +108,7 @@ module.exports = (sequelize) => {
         height: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
         price: { type: DataTypes.DECIMAL(15, 2), allowNull: true },
         cost_price: { type: DataTypes.DECIMAL(15, 2), allowNull: true },
-        image_url: { type: DataTypes.TEXT, allowNull: true },
+        image_url: { type: DataTypes.TEXT("long"), allowNull: true },
         country: { type: DataTypes.STRING(100), allowNull: true },
         status: {
             type: DataTypes.ENUM('active', 'inactive'),
