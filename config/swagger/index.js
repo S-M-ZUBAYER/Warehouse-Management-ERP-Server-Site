@@ -13,6 +13,7 @@ const inboundModule = require('./paths/inbound.paths');
 const stockModule = require('./paths/stock.paths');
 const platformStoreModule = require('./paths/platform_stores.paths');
 const platformSkuMappingModule = require('./paths/platform_sku_mappings.paths');
+const inventoryListModule = require('./paths/inventory.paths');
 // ✅ Adding a new module = one import line + one entry in the array below
 
 const modules = [
@@ -26,7 +27,8 @@ const modules = [
     inboundModule,
     stockModule,
     platformStoreModule,
-    platformSkuMappingModule
+    platformSkuMappingModule,
+    inventoryListModule
 ];
 
 // ── Auto-merge all modules into base ─────────────────────────────────

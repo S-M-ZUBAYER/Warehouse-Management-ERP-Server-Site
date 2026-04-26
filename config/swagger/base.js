@@ -82,6 +82,7 @@ module.exports = {
         { name: 'Merchant SKUs', description: 'Merchant SKU management' },
         { name: 'Combine SKUs', description: 'Bundle / combine SKU management' },
         { name: 'Inbound', description: 'Inbound draft, On the way and received sku management' },
+        { name: 'Inventory', description: 'Inbound draft, On the way and received sku management' },
         // ✅ Just add a new line here for each new module
     ],
 };

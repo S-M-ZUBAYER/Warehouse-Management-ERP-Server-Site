@@ -107,8 +107,10 @@ module.exports = {
                 tags: ['Stock'], summary: 'Get stock movement ledger (audit log)',
                 security: [{ bearerAuth: [] }],
                 parameters: [
-                    { in: 'query', name: 'merchantSkuId', schema: { type: 'integer' } },
-                    { in: 'query', name: 'warehouseId', schema: { type: 'integer' } },
+                    { in: 'query', name: 'merchantSkuId', schema: { type: 'integer' }, description: 'Filter by merchant SKU ID' },
+                    { in: 'query', name: 'warehouseId', schema: { type: 'integer' }, description: 'Filter by warehouse ID' },
+                    { in: 'query', name: 'skuName', schema: { type: 'string' }, description: 'Filter by SKU name (partial, case-insensitive)' },
+                    { in: 'query', name: 'movementType', schema: { type: 'string', enum: ['inbound_receipt', 'sale_deduction', 'manual_adjustment', 'return'] }, description: 'Filter by movement type' },
                     { in: 'query', name: 'page', schema: { type: 'integer', default: 1 } },
                     { in: 'query', name: 'limit', schema: { type: 'integer', default: 30 } },
                 ],

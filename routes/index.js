@@ -24,6 +24,7 @@ router.use('/inbound', require('../modules/inbound/inbound.routes'));
 
 // ── Inventory: Stock management + deduction API ───────────────────────────────
 router.use('/stock', require('../modules/stock/stock.routes'));
+router.use('/inventory', require('../modules/inventory/inventory.routes'));
 
 // ── Platform integration ──────────────────────────────────────────────────────
 router.use('/platform-stores', require('../modules/platformStores/platformStores.routes'));

@@ -14,7 +14,7 @@ const apiLimiter = rateLimit({
 
 // Strict limiter for auth routes (login / register)
 const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 1 * 60 * 1000, // 1 minutes
     max: 10,
     standardHeaders: true,
     legacyHeaders: false,

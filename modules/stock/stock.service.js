@@ -207,9 +207,14 @@ const manualAdjustStock = async (user, data) => {
     });
     if (combineItems.length) {
         const ids = [...new Set(combineItems.map(i => i.combine_sku_id))];
-        const pipeline = redis.client.pipeline ? redis.client.pipeline() : redis.client.multi();
+        // const pipeline = redis.client.pipeline ? redis.client.pipeline() : redis.client.multi();
+        // ids.forEach(id =>
+        //     pipeline.rpush('queue:combine_sku_recompute', JSON.stringify({ companyId: user.companyId, combineSkuId: id }))
+        // );
+        // await pipeline.exec().catch(e => console.error('[redis queue]', e.message));
+        const pipeline = redis.client.multi();
         ids.forEach(id =>
-            pipeline.rpush('queue:combine_sku_recompute', JSON.stringify({ companyId: user.companyId, combineSkuId: id }))
+            pipeline.rPush('queue:combine_sku_recompute', JSON.stringify({ companyId: user.companyId, combineSkuId: id }))
         );
         await pipeline.exec().catch(e => console.error('[redis queue]', e.message));
     }
@@ -365,8 +370,14 @@ const deductStock = async (user, data) => {
 
     // 4. Queue combine SKU recompute after commit
     if (affectedSkus.length && mapping.combine_sku_id) {
-        const pipeline = redis.client.pipeline ? redis.client.pipeline() : redis.client.multi();
-        pipeline.rpush('queue:combine_sku_recompute', JSON.stringify({
+        // const pipeline = redis.client.pipeline ? redis.client.pipeline() : redis.client.multi();
+        // pipeline.rpush('queue:combine_sku_recompute', JSON.stringify({
+        //     companyId: user.companyId,
+        //     combineSkuId: mapping.combine_sku_id,
+        // }));
+        // await pipeline.exec().catch(e => console.error('[redis queue]', e.message));
+        const pipeline = redis.client.multi();
+        pipeline.rPush('queue:combine_sku_recompute', JSON.stringify({
             companyId: user.companyId,
             combineSkuId: mapping.combine_sku_id,
         }));
@@ -381,9 +392,14 @@ const deductStock = async (user, data) => {
             raw: true,
         });
         if (linkedCombines.length) {
-            const pipeline = redis.client.pipeline ? redis.client.pipeline() : redis.client.multi();
+            // const pipeline = redis.client.pipeline ? redis.client.pipeline() : redis.client.multi();
+            // linkedCombines.forEach(({ combine_sku_id }) =>
+            //     pipeline.rpush('queue:combine_sku_recompute', JSON.stringify({ companyId: user.companyId, combineSkuId: combine_sku_id }))
+            // );
+            // await pipeline.exec().catch(e => console.error('[redis queue]', e.message));
+            const pipeline = redis.client.multi();
             linkedCombines.forEach(({ combine_sku_id }) =>
-                pipeline.rpush('queue:combine_sku_recompute', JSON.stringify({ companyId: user.companyId, combineSkuId: combine_sku_id }))
+                pipeline.rPush('queue:combine_sku_recompute', JSON.stringify({ companyId: user.companyId, combineSkuId: combine_sku_id }))
             );
             await pipeline.exec().catch(e => console.error('[redis queue]', e.message));
         }
@@ -398,23 +414,61 @@ const deductStock = async (user, data) => {
 };
 
 // ─── Get ledger / history for a SKU ──────────────────────────────────────────
-const getStockLedger = async (user, { merchantSkuId, warehouseId, page = 1, limit = 30 }) => {
+// const getStockLedger = async (user, { merchantSkuId, warehouseId, page = 1, limit = 30 }) => {
+//     const { StockLedgerEntry, MerchantSku, Warehouse } = require('../../models');
+
+//     const where = { company_id: user.companyId };
+//     if (merchantSkuId) where.merchant_sku_id = merchantSkuId;
+//     if (warehouseId) where.warehouse_id = warehouseId;
+
+//     const offset = (parseInt(page) - 1) * parseInt(limit);
+
+//     const { count, rows } = await StockLedgerEntry.findAndCountAll({
+//         where,
+//         include: [
+//             { model: MerchantSku, as: 'merchantSku', attributes: ['id', 'sku_name', 'sku_title'], required: false },
+//         ],
+//         order: [['created_at', 'DESC']],
+//         limit: parseInt(limit),
+//         offset,
+//     });
+
+//     return {
+//         data: rows,
+//         pagination: { total: count, page: parseInt(page), limit: parseInt(limit), totalPages: Math.ceil(count / parseInt(limit)) },
+//     };
+// };
+
+const getStockLedger = async (user, { merchantSkuId, warehouseId, skuName, movementType, page = 1, limit = 30 }) => {
     const { StockLedgerEntry, MerchantSku, Warehouse } = require('../../models');
+    const { Op } = require('sequelize');
+    console.log(skuName, movementType);
 
     const where = { company_id: user.companyId };
     if (merchantSkuId) where.merchant_sku_id = merchantSkuId;
     if (warehouseId) where.warehouse_id = warehouseId;
+    if (movementType) where.movement_type = movementType;  // direct column filter
+
+    const merchantSkuWhere = {};
+    if (skuName) merchantSkuWhere.sku_name = { [Op.like]: `%${skuName}%` }; // case-insensitive partial match
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     const { count, rows } = await StockLedgerEntry.findAndCountAll({
         where,
         include: [
-            { model: MerchantSku, as: 'merchantSku', attributes: ['id', 'sku_name', 'sku_title'], required: false },
+            {
+                model: MerchantSku,
+                as: 'merchantSku',
+                attributes: ['id', 'sku_name', 'sku_title'],
+                where: Object.keys(merchantSkuWhere).length ? merchantSkuWhere : undefined,
+                required: Object.keys(merchantSkuWhere).length > 0, // INNER JOIN only when filtering by sku_name
+            },
         ],
         order: [['created_at', 'DESC']],
         limit: parseInt(limit),
         offset,
+        distinct: true, // important for accurate count with associations
     });
 
     return {
