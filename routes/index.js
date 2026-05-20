@@ -24,6 +24,9 @@ router.use('/combine-skus', authenticate, requirePageAccess('combine_sku'), requ
 router.use('/inventory', authenticate, requirePageAccess('inventory_list'), require('../modules/inventory/inventory.routes'));
 router.use('/stock', authenticate, requirePageAccess('inventory_list'), require('../modules/stock/stock.routes'));
 router.use('/inbound', authenticate, requirePageAccess('inbound'), require('../modules/inbound/inbound.routes'));
+router.use('/order-management', authenticate, require('../modules/packFailedOrders/packFailedOrders.routes'));
+router.use('/order-management', authenticate, require('../modules/pushSuccessfulOrders/pushSuccessfulOrders.routes'));
+router.use('/order-management', authenticate, require('../modules/withdrawOrders/withdrawOrders.routes'));
 
 // Marketplace order notifications. This route has its own API-key middleware
 // because Shopee/TikTok webhook workers do not use the ERP user JWT flow.

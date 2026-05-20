@@ -29,6 +29,9 @@ const PlatformStore = require('./PlatformStore')(sequelize);       // NEW
 const PlatformSkuMapping = require('./PlatformSkuMapping')(sequelize);  // NEW
 const OrderSaleLine = require('./OrderSaleLine')(sequelize);       // NEW
 const PlatformProduct = require('./PlatformProduct')(sequelize);       // NEW
+const PackFailedOrder = require('./PackFailedOrder')(sequelize);       // NEW
+const PushSuccessfulOrder = require('./PushSuccessfulOrder')(sequelize);       // NEW
+const WithdrawOrder = require('./WithdrawOrder')(sequelize);       // NEW
 
 // ── MerchantSku Sync integration ──────────────────────────────────────────────────────
 const MerchantSkuSyncGroup=require('./MerchantSkuSyncGroup')(sequelize);   //New
@@ -82,6 +85,9 @@ const models = {
     PlatformSkuMapping,
     OrderSaleLine,
     PlatformProduct,
+    PackFailedOrder,
+    PushSuccessfulOrder,
+    WithdrawOrder,
     MerchantSkuSyncGroup,
     MerchantSkuSyncMember
     // Add here as you uncomment above

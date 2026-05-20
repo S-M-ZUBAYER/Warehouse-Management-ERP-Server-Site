@@ -18,6 +18,9 @@ const platformProductsModule = require('./paths/platformProducts.paths');
 const skuMappingModule = require('./paths/skuMapping.paths');
 const skuSyncGroupModule = require('./paths/skuSyncGroup.paths');
 const platformOrderDeductionsModule = require('./paths/platformOrderDeductions.paths');
+const packFailedOrdersModule = require('./paths/packFailedOrders.paths');
+const pushSuccessfulOrdersModule = require('./paths/pushSuccessfulOrders.paths');
+const withdrawOrdersModule = require('./paths/withdrawOrders.paths');
 // ✅ Adding a new module = one import line + one entry in the array below
 
 const modules = [
@@ -36,7 +39,10 @@ const modules = [
     platformProductsModule,
     skuMappingModule,
     skuSyncGroupModule,
-    platformOrderDeductionsModule
+    platformOrderDeductionsModule,
+    packFailedOrdersModule,
+    pushSuccessfulOrdersModule,
+    withdrawOrdersModule
 ];
 
 // ── Auto-merge all modules into base ─────────────────────────────────
