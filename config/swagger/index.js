@@ -24,6 +24,7 @@ const pushSuccessfulOrdersModule = require('./paths/pushSuccessfulOrders.paths')
 const withdrawOrdersModule = require('./paths/withdrawOrders.paths');
 const manualOrdersModule = require('./paths/manualOrders.paths');
 const platformManualOrdersModule = require('./paths/platformManualOrders.paths');
+const dashboardModule = require('./paths/dashboard.paths');
 // ✅ Adding a new module = one import line + one entry in the array below
 
 const modules = [
@@ -48,7 +49,8 @@ const modules = [
     pushSuccessfulOrdersModule,
     withdrawOrdersModule,
     manualOrdersModule,
-    platformManualOrdersModule
+    platformManualOrdersModule,
+    dashboardModule
 ];
 
 // ── Auto-merge all modules into base ─────────────────────────────────

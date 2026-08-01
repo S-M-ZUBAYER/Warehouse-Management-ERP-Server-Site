@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 const axios = require("axios");
 const fs = require("fs");
@@ -6,6 +6,8 @@ const path = require("path");
 const { Op } = require("sequelize");
 const { sequelize } = require("../../config/database");
 const platformOrderDeductionsService = require("../platformOrderDeductions/platformOrderDeductions.service");
+const sellableSkuStock = require("../shared/sellableSkuStock");
+const { applyWarehouseScope, assertWarehousePermission } = require("../../utils/permissions");
 
 const DEFAULT_IMAGE = "https://placehold.co/36x36/E6ECF0/004368?text=?";
 const EASY_PARCEL_TIMEOUT_MS = Number(process.env.EASYPARCEL_TIMEOUT_MS || 20000);
@@ -1653,7 +1655,9 @@ const buildStoredManualOrderBody = (order) => {
             parcelValue: Math.max(1, moneyNumber(order.cod_amount || order.order_value || order.subtotal || 1)),
         },
         items: (order.items || []).map((item) => ({
-            merchantSkuId: item.merchant_sku_id,
+            merchantSkuId: item.merchant_sku_id || null,
+            combineSkuId: item.combine_sku_id || null,
+            skuType: item.combine_sku_id ? 'combine' : 'merchant',
             sku: item.sku,
             productName: item.product_name,
             quantity: item.quantity,
@@ -2576,7 +2580,7 @@ const getManualOrderDropdowns = async (user) => {
     const companyId = resolveCompanyId(user);
 
     const warehouses = await Warehouse.findAll({
-        where: { company_id: companyId, status: "active" },
+        where: await applyWarehouseScope(user, { company_id: companyId, status: "active" }),
         attributes: ["id", "name", "code", "location", "city", "country", "manager_name", "phone", "is_default"],
         order: [["is_default", "DESC"], ["name", "ASC"]],
         raw: true,
@@ -2606,7 +2610,7 @@ const getManualOrderDropdowns = async (user) => {
 };
 
 const searchWarehouseSkus = async (user, { warehouseId, search, page = 1, limit = 50, skuType = "sku_name" }) => {
-    const { MerchantSku, SkuWarehouseStock, Warehouse } = require("../../models");
+    const { MerchantSku, CombineSku, CombineSkuItem, SkuWarehouseStock, Warehouse } = require("../../models");
     const companyId = resolveCompanyId(user);
     const numericWarehouseId = Number(warehouseId);
 
@@ -2615,89 +2619,142 @@ const searchWarehouseSkus = async (user, { warehouseId, search, page = 1, limit 
         err.statusCode = 400;
         throw err;
     }
+    await assertWarehousePermission(user, numericWarehouseId);
+    const selectedWarehouse = await Warehouse.findOne({
+        where: { id: numericWarehouseId, company_id: companyId },
+        attributes: ["id", "name", "code"],
+        raw: true,
+    });
 
-    const where = {
-        company_id: companyId,
-        status: "active",
-        deleted_at: null,
-    };
-
+    const where = { company_id: companyId, status: "active", deleted_at: null };
+    const combineWhere = { company_id: companyId, status: "active", deleted_at: null, warehouse_id: numericWarehouseId };
     const q = normalizeString(search);
     if (q) {
-        where[Op.or] = [
-            { sku_name: { [Op.like]: `%${q}%` } },
-            { sku_title: { [Op.like]: `%${q}%` } },
-        ];
         if (skuType === "product_name") {
-            where[Op.or] = [
-                { sku_title: { [Op.like]: `%${q}%` } },
-                { sku_name: { [Op.like]: `%${q}%` } },
-            ];
+            where.sku_title = { [Op.like]: `%${q}%` };
+            combineWhere.combine_name = { [Op.like]: `%${q}%` };
+        } else {
+            where.sku_name = { [Op.like]: `%${q}%` };
+            combineWhere.combine_sku_code = { [Op.like]: `%${q}%` };
         }
     }
 
     const offset = (parseInt(page, 10) - 1) * parseInt(limit, 10);
-    const { count, rows } = await MerchantSku.findAndCountAll({
-        where,
-        attributes: ["id", "sku_name", "sku_title", "image_url", "price", "weight", "length", "width", "height", "warehouse_id"],
-        include: [
-            {
+    const pageLimit = parseInt(limit, 10);
+    const [{ count, rows }, combineRows] = await Promise.all([
+        MerchantSku.findAndCountAll({
+            where,
+            attributes: ["id", "sku_name", "sku_title", "image_url", "price", "weight", "length", "width", "height", "warehouse_id"],
+            include: [{
                 model: SkuWarehouseStock,
                 as: "stock",
                 required: true,
                 where: { warehouse_id: numericWarehouseId, company_id: companyId },
                 attributes: ["id", "warehouse_id", "qty_on_hand", "qty_reserved", "qty_inbound"],
-                include: [
-                    { model: Warehouse, as: "warehouse", attributes: ["id", "name", "code"], required: false },
-                ],
-            },
-        ],
-        order: [["sku_name", "ASC"]],
-        limit: parseInt(limit, 10),
-        offset,
-        distinct: true,
+                include: [{ model: Warehouse, as: "warehouse", attributes: ["id", "name", "code"], required: false }],
+            }],
+            order: [["sku_name", "ASC"]],
+            limit: pageLimit,
+            offset,
+            distinct: true,
+        }),
+        CombineSku.findAll({
+            where: combineWhere,
+            attributes: ["id", "combine_sku_code", "combine_name", "image_url", "selling_price", "weight", "length", "width", "height", "warehouse_id", "computed_quantity"],
+            include: [{
+                model: CombineSkuItem,
+                as: "items",
+                attributes: ["id", "merchant_sku_id"],
+                required: false,
+                include: [{
+                    model: MerchantSku,
+                    as: "merchantSku",
+                    attributes: ["id", "image_url"],
+                    required: false,
+                }],
+            }],
+            order: [["combine_sku_code", "ASC"]],
+            limit: pageLimit,
+        }),
+    ]);
+
+    const merchantData = rows.map((sku) => {
+        const stock = Array.isArray(sku.stock) ? sku.stock[0] : sku.stock;
+        const qtyOnHand = Number(stock?.qty_on_hand || 0);
+        const qtyReserved = Number(stock?.qty_reserved || 0);
+        const qtyAvailable = Math.max(0, qtyOnHand - qtyReserved);
+        return {
+            id: sku.id,
+            row_id: `merchant:${sku.id}`,
+            sku_type: "merchant",
+            merchant_sku_id: sku.id,
+            sku_name: sku.sku_name,
+            sku_title: sku.sku_title,
+            product_name: sku.sku_title,
+            image_url: sku.image_url || DEFAULT_IMAGE,
+            price: Number(sku.price || 0),
+            weight: Number(sku.weight || 0),
+            length: Number(sku.length || 0),
+            width: Number(sku.width || 0),
+            height: Number(sku.height || 0),
+            warehouse_id: stock?.warehouse_id || numericWarehouseId,
+            warehouse_name: stock?.warehouse?.name || null,
+            stock_id: stock?.id || null,
+            qty_on_hand: qtyOnHand,
+            total_available: qtyOnHand,
+            qty_reserved: qtyReserved,
+            lock_quantity: qtyReserved,
+            qty_inbound: Number(stock?.qty_inbound || 0),
+            qty_available: qtyAvailable,
+            available_for_platform: qtyAvailable,
+            available_inventory: qtyAvailable,
+        };
     });
 
+    const combineData = await Promise.all(combineRows.map(async (sku) => {
+        const availability = await sellableSkuStock.getCombineAvailability({ companyId, combineSkuId: sku.id, warehouseId: numericWarehouseId });
+        const qtyAvailable = Number(availability?.available || 0);
+        const firstItem = Array.isArray(sku.items) ? sku.items.find((item) => item?.merchantSku?.image_url) : null;
+        const imageUrl = sku.image_url || firstItem?.merchantSku?.image_url || DEFAULT_IMAGE;
+        return {
+            id: sku.id,
+            row_id: `combine:${sku.id}`,
+            sku_type: "combine",
+            combine_sku_id: sku.id,
+            sku_name: sku.combine_sku_code,
+            sku_title: sku.combine_name,
+            product_name: sku.combine_name,
+            image_url: imageUrl,
+            price: Number(sku.selling_price || 0),
+            weight: Number(sku.weight || 0),
+            length: Number(sku.length || 0),
+            width: Number(sku.width || 0),
+            height: Number(sku.height || 0),
+            warehouse_id: numericWarehouseId,
+            warehouse_name: selectedWarehouse?.name || null,
+            stock_id: null,
+            qty_on_hand: qtyAvailable,
+            total_available: qtyAvailable,
+            qty_reserved: 0,
+            lock_quantity: 0,
+            qty_inbound: 0,
+            qty_available: qtyAvailable,
+            available_for_platform: qtyAvailable,
+            available_inventory: qtyAvailable,
+        };
+    }));
+
+    const data = [...merchantData, ...combineData].slice(0, pageLimit);
     return {
-        data: rows.map((sku) => {
-            const stock = Array.isArray(sku.stock) ? sku.stock[0] : sku.stock;
-            const qtyOnHand = Number(stock?.qty_on_hand || 0);
-            const qtyReserved = Number(stock?.qty_reserved || 0);
-            const qtyAvailable = Math.max(0, qtyOnHand - qtyReserved);
-            return {
-                id: sku.id,
-                merchant_sku_id: sku.id,
-                sku_name: sku.sku_name,
-                sku_title: sku.sku_title,
-                product_name: sku.sku_title,
-                image_url: sku.image_url || DEFAULT_IMAGE,
-                price: Number(sku.price || 0),
-                weight: Number(sku.weight || 0),
-                length: Number(sku.length || 0),
-                width: Number(sku.width || 0),
-                height: Number(sku.height || 0),
-                warehouse_id: stock?.warehouse_id || numericWarehouseId,
-                warehouse_name: stock?.warehouse?.name || null,
-                stock_id: stock?.id || null,
-                qty_on_hand: qtyOnHand,
-                total_available: qtyOnHand,
-                qty_reserved: qtyReserved,
-                lock_quantity: qtyReserved,
-                qty_inbound: Number(stock?.qty_inbound || 0),
-                qty_available: qtyAvailable,
-                available_for_platform: qtyAvailable,
-                available_inventory: qtyAvailable,
-            };
-        }),
+        data,
         pagination: {
-            total: count,
+            total: count + combineRows.length,
             page: parseInt(page, 10),
-            limit: parseInt(limit, 10),
-            totalPages: Math.ceil(count / parseInt(limit, 10)),
+            limit: pageLimit,
+            totalPages: Math.ceil((count + combineRows.length) / pageLimit),
         },
     };
 };
-
 const toManualOrderApi = (order) => {
     const plain = order?.toJSON ? order.toJSON() : order || {};
     const logisticRaw = plain.logistic_raw && typeof plain.logistic_raw === "object" ? plain.logistic_raw : {};
@@ -2705,7 +2762,9 @@ const toManualOrderApi = (order) => {
     const afterShip = logisticRaw.afterShip || logisticRaw.aftership || null;
     const items = (plain.items || []).map((item) => ({
         id: item.id,
-        merchantSkuId: item.merchant_sku_id,
+        merchantSkuId: item.merchant_sku_id || null,
+        combineSkuId: item.combine_sku_id || null,
+        skuType: item.combine_sku_id ? 'combine' : 'merchant',
         sku: item.sku,
         productName: item.product_name,
         quantity: Number(item.quantity || 0),
@@ -3099,7 +3158,7 @@ const getManualOrderDetail = async (user, id) => {
 };
 
 const createManualOrder = async (user, body) => {
-    const { Warehouse, MerchantSku, SkuWarehouseStock, StockLedgerEntry, ManualOrder, ManualOrderItem, PlatformSkuMapping } = require("../../models");
+    const { Warehouse, MerchantSku, CombineSku, SkuWarehouseStock, ManualOrder, ManualOrderItem, PlatformSkuMapping } = require("../../models");
     const companyId = resolveCompanyId(user);
     const warehouseId = Number(body.warehouseId || body.warehouse_id);
     const type = body.type === "gift" ? "gift" : "manual_order";
@@ -3116,6 +3175,7 @@ const createManualOrder = async (user, body) => {
         err.statusCode = 400;
         throw err;
     }
+    await assertWarehousePermission(user, warehouseId, { canEdit: true });
     if (!items.length) {
         const err = new Error("At least one order item is required");
         err.statusCode = 400;
@@ -3242,83 +3302,56 @@ const createManualOrder = async (user, body) => {
         });
 
         for (const item of items) {
-            const merchantSkuId = Number(item.merchantSkuId || item.merchant_sku_id || item.skuId || item.id);
             const quantity = toPositiveInt(item.quantity || item.qty, "item quantity");
             const unitPrice = type === "gift" ? 0 : toNumber(item.unitPrice || item.unit_price);
-
-            if (!Number.isInteger(merchantSkuId) || merchantSkuId <= 0) {
-                const err = new Error("Each item must include merchantSkuId/skuId");
-                err.statusCode = 400;
-                throw err;
-            }
-
-            const sku = await MerchantSku.findOne({
-                where: { id: merchantSkuId, company_id: companyId, deleted_at: null, status: "active" },
-                transaction,
-            });
+            const ref = sellableSkuStock.getLineSkuRef(item);
+            const sku = ref.kind === "combine"
+                ? await CombineSku.findOne({ where: { id: ref.combineSkuId, company_id: companyId, warehouse_id: warehouseId, deleted_at: null, status: "active" }, transaction })
+                : await MerchantSku.findOne({ where: { id: ref.merchantSkuId, company_id: companyId, deleted_at: null, status: "active" }, transaction });
             if (!sku) {
-                const err = new Error(`Merchant SKU ${merchantSkuId} not found`);
+                const err = new Error(`${ref.kind === "combine" ? "Combine" : "Merchant"} SKU not found`);
                 err.statusCode = 404;
                 throw err;
             }
 
-            const stockRecord = await SkuWarehouseStock.findOne({
-                where: { company_id: companyId, merchant_sku_id: merchantSkuId, warehouse_id: warehouseId },
-                lock: transaction.LOCK.UPDATE,
+            const deduction = await sellableSkuStock.deductSellableStock({
+                user,
+                companyId,
+                line: item,
+                warehouseId,
+                quantity,
+                referenceType: "manual_order",
+                referenceId: orderNumber,
+                notes: type === "gift" ? "Gift order stock deduction" : "Manual order stock deduction",
+                movementType: "sale_deduction",
                 transaction,
             });
-            if (!stockRecord) {
-                const err = new Error(`No stock record for ${sku.sku_name} in selected warehouse`);
-                err.statusCode = 400;
-                throw err;
-            }
+            deduction.childDeductions.forEach((child) => affectedMerchantSkuIds.push(child.merchantSkuId));
+            platformStockDeductionItems.push(deduction.platformDeduction);
 
-            const qtyOnHand = Number(stockRecord.qty_on_hand || 0);
-            const qtyReserved = Number(stockRecord.qty_reserved || 0);
-            const qtyAvailable = Math.max(0, qtyOnHand - qtyReserved);
-            if (qtyAvailable < quantity) {
-                const err = new Error(`Insufficient available stock for ${sku.sku_name}: available ${qtyAvailable}, requested ${quantity}`);
-                err.statusCode = 400;
-                throw err;
-            }
-
-            const newQtyOnHand = qtyOnHand - quantity;
-            await stockRecord.update({ qty_on_hand: newQtyOnHand }, { transaction });
-
-            await StockLedgerEntry.create({
-                company_id: companyId,
-                merchant_sku_id: merchantSkuId,
-                warehouse_id: warehouseId,
-                sku_warehouse_stock_id: stockRecord.id,
-                movement_type: "sale_deduction",
-                quantity_delta: -quantity,
-                qty_on_hand_after: newQtyOnHand,
-                reference_type: "manual_order",
-                reference_id: orderNumber,
-                notes: type === "gift" ? "Gift order stock deduction" : "Manual order stock deduction",
-                created_by: user.userId || user.id || null,
-            }, { transaction });
-
+            const before = deduction.childDeductions[0]?.qtyOnHandBefore ?? null;
+            const after = deduction.childDeductions[0]?.qtyOnHandAfter ?? null;
+            const skuCode = ref.kind === "combine" ? sku.combine_sku_code : sku.sku_name;
+            const skuTitle = ref.kind === "combine" ? sku.combine_name : sku.sku_title;
+            const imageUrl = item.image || item.imageUrl || sku.image_url;
             const line = await ManualOrderItem.create({
                 company_id: companyId,
                 manual_order_id: createdOrder.id,
-                merchant_sku_id: merchantSkuId,
+                merchant_sku_id: ref.kind === "merchant" ? ref.merchantSkuId : null,
+                combine_sku_id: ref.kind === "combine" ? ref.combineSkuId : null,
                 warehouse_id: warehouseId,
-                sku: sku.sku_name,
-                product_name: item.productName || item.name || sku.sku_title,
+                sku: skuCode,
+                product_name: item.productName || item.name || skuTitle,
                 quantity,
                 unit_price: unitPrice,
                 weight: toNumber(item.weight || sku.weight),
                 line_total: unitPrice * quantity,
-                image_url: item.image || item.imageUrl || sku.image_url,
-                qty_on_hand_before: qtyOnHand,
-                qty_on_hand_after: newQtyOnHand,
+                image_url: imageUrl,
+                qty_on_hand_before: before,
+                qty_on_hand_after: after,
             }, { transaction });
             createdItems.push(line);
-            affectedMerchantSkuIds.push(merchantSkuId);
-            platformStockDeductionItems.push({ merchantSkuId, warehouseId, quantity });
         }
-
         if (affectedMerchantSkuIds.length) {
             await PlatformSkuMapping.update(
                 { sync_status: "out_of_sync", sync_error: null },
@@ -4207,12 +4240,13 @@ const releaseReservedForMapping = async ({ user, mapping, quantity, transaction 
 };
 
 const changePlatformOrderSku = async (user, body) => {
-    const { MerchantSku, OrderSaleLine } = require('../../models');
+    const { CombineSku, MerchantSku, OrderSaleLine } = require('../../models');
     const companyId = resolveCompanyId(user);
     const platform = normalizeString(body.platform).toLowerCase();
     const order = body.order || {};
     const item = body.item || {};
     const merchantSkuId = Number(body.merchantSkuId || item.merchantSkuId);
+    const combineSkuId = Number(body.combineSkuId || item.combineSkuId);
     const warehouseId = Number(body.warehouseId || item.warehouseId);
     const quantitySold = toPositiveInt(item.quantity || body.quantitySold || 1, 'quantitySold');
     const platformOrderId = normalizeString(order.orderId || order.orderNo || order.id || body.platformOrderId);
@@ -4228,17 +4262,30 @@ const changePlatformOrderSku = async (user, body) => {
         err.statusCode = 400;
         throw err;
     }
-    if (!Number.isInteger(merchantSkuId) || merchantSkuId <= 0 || !Number.isInteger(warehouseId) || warehouseId <= 0) {
+    const hasMerchantSku = Number.isInteger(merchantSkuId) && merchantSkuId > 0;
+    const hasCombineSku = Number.isInteger(combineSkuId) && combineSkuId > 0;
+    if (hasMerchantSku === hasCombineSku || !Number.isInteger(warehouseId) || warehouseId <= 0) {
         const err = new Error('merchantSkuId and warehouseId are required');
         err.statusCode = 400;
         throw err;
     }
 
-    const merchantSku = await MerchantSku.findOne({ where: { id: merchantSkuId, company_id: companyId, deleted_at: null, status: 'active' } });
-    if (!merchantSku) {
-        const err = new Error('Selected merchant SKU not found');
-        err.statusCode = 404;
-        throw err;
+    if (hasMerchantSku) {
+        const merchantSku = await MerchantSku.findOne({ where: { id: merchantSkuId, company_id: companyId, deleted_at: null, status: 'active' } });
+        if (!merchantSku) {
+            const err = new Error('Selected merchant SKU not found');
+            err.statusCode = 404;
+            throw err;
+        }
+    } else {
+        const combineSku = await CombineSku.findOne({
+            where: { id: combineSkuId, company_id: companyId, warehouse_id: warehouseId, status: 'active', deleted_at: null },
+        });
+        if (!combineSku) {
+            const err = new Error('Selected combine SKU not found in this warehouse');
+            err.statusCode = 404;
+            throw err;
+        }
     }
 
     let mappingId;
@@ -4263,8 +4310,8 @@ const changePlatformOrderSku = async (user, body) => {
         }
 
         await mapping.update({
-            merchant_sku_id: merchantSkuId,
-            combine_sku_id: null,
+            merchant_sku_id: hasMerchantSku ? merchantSkuId : null,
+            combine_sku_id: hasCombineSku ? combineSkuId : null,
             fulfillment_warehouse_id: warehouseId,
             sync_status: 'out_of_sync',
             sync_error: null,
@@ -4281,7 +4328,8 @@ const changePlatformOrderSku = async (user, body) => {
 
     return {
         message: 'SKU mapping updated and stock locked for the selected SKU',
-        merchantSkuId,
+        merchantSkuId: hasMerchantSku ? merchantSkuId : null,
+        combineSkuId: hasCombineSku ? combineSkuId : null,
         warehouseId,
         reserved,
     };
@@ -4317,3 +4365,6 @@ module.exports = {
     finalizePackedPlatformOrder,
     changePlatformOrderSku,
 };
+
+
+

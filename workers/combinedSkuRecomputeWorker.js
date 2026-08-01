@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 /**
  * combinedSkuRecomputeWorker.js
@@ -26,10 +26,10 @@ const QUEUE_KEY = 'queue:combine_sku_recompute';
 const DEBOUNCE_MS = 300;   // collapse duplicate recompute jobs within 300ms
 const POLL_TIMEOUT = 5;     // BLPOP timeout in seconds (0 = block forever)
 
-// In-memory debounce: combineSkuId → timeout handle
+// In-memory debounce: combineSkuId â†’ timeout handle
 const pending = new Map();
 
-// ─── Core recompute logic ─────────────────────────────────────────────────────
+// â”€â”€â”€ Core recompute logic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const recomputeOne = async (companyId, combineSkuId) => {
     const { CombineSku, CombineSkuItem, SkuWarehouseStock } = require('../models');
 
@@ -40,7 +40,7 @@ const recomputeOne = async (companyId, combineSkuId) => {
     });
 
     if (!combineSku) {
-        console.warn(`[worker] Combine SKU ${combineSkuId} not found — skipping`);
+        console.warn(`[worker] Combine SKU ${combineSkuId} not found â€” skipping`);
         return;
     }
 
@@ -51,7 +51,7 @@ const recomputeOne = async (companyId, combineSkuId) => {
     });
 
     if (!items.length) {
-        console.warn(`[worker] Combine SKU ${combineSkuId} has no items — skipping`);
+        console.warn(`[worker] Combine SKU ${combineSkuId} has no items â€” skipping`);
         return;
     }
 
@@ -78,10 +78,10 @@ const recomputeOne = async (companyId, combineSkuId) => {
         { where: { id: combineSkuId, company_id: companyId } }
     );
 
-    console.log(`[worker] Recomputed combine SKU ${combineSkuId} → qty ${computedQty}`);
+    console.log(`[worker] Recomputed combine SKU ${combineSkuId} â†’ qty ${computedQty}`);
 };
 
-// ─── Debounced dispatch ───────────────────────────────────────────────────────
+// â”€â”€â”€ Debounced dispatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const scheduleRecompute = (companyId, combineSkuId) => {
     const key = `${companyId}:${combineSkuId}`;
     if (pending.has(key)) clearTimeout(pending.get(key));
@@ -98,14 +98,14 @@ const scheduleRecompute = (companyId, combineSkuId) => {
     pending.set(key, handle);
 };
 
-// ─── Main loop ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Main loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const run = async () => {
-    console.log('[worker] combinedSkuRecomputeWorker started — listening on', QUEUE_KEY);
+    console.log('[worker] combinedSkuRecomputeWorker started â€” listening on', QUEUE_KEY);
 
     await sequelize.authenticate();
     console.log('[worker] DB connected');
 
-    // Create a dedicated blocking client (redis v4 — no .duplicate())
+    // Create a dedicated blocking client (redis v4 â€” no .duplicate())
     const { createClient } = require('redis');
     const blockingClient = createClient({
         socket: {
@@ -122,9 +122,9 @@ const run = async () => {
     while (true) {
         try {
             const result = await blockingClient.blPop(QUEUE_KEY, POLL_TIMEOUT);
-            if (!result) continue; // timeout — loop again
+            if (!result) continue; // timeout â€” loop again
 
-            const [, raw] = result;
+            const raw = Array.isArray(result) ? result[1] : result.element;
             let job;
             try {
                 job = JSON.parse(raw);
@@ -143,7 +143,7 @@ const run = async () => {
 
         } catch (err) {
             if (err.message && err.message.includes('Connection is closed')) {
-                console.error('[worker] Redis connection lost — retrying in 3s');
+                console.error('[worker] Redis connection lost â€” retrying in 3s');
                 await new Promise(r => setTimeout(r, 3000));
             } else {
                 console.error('[worker] Unexpected error:', err.message);
@@ -153,9 +153,9 @@ const run = async () => {
     }
 };
 
-// ─── Graceful shutdown ────────────────────────────────────────────────────────
+// â”€â”€â”€ Graceful shutdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 process.on('SIGTERM', async () => {
-    console.log('[worker] SIGTERM received — shutting down gracefully');
+    console.log('[worker] SIGTERM received â€” shutting down gracefully');
     // Drain pending debounced jobs
     for (const [key, handle] of pending) {
         clearTimeout(handle);

@@ -7,6 +7,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const redis = require('../../config/redis');
 const { mirrorStockChange } = require('../skuSyncGroup/skuSyncGroup.service');
+const { applyWarehouseScope, assertWarehousePermission } = require('../../utils/permissions');
 
 // ─── Recompute a single combined SKU's computed_quantity ──────────────────────
 // Formula: MIN(FLOOR(component warehouse qty_on_hand / item.quantity)).
@@ -513,8 +514,11 @@ const packReservedStock = async (user, data) => {
     const { platformMappingId, platformOrderId, platformOrderItemId } = data;
     const quantitySold = toPositiveInt(data.quantitySold, 'quantitySold');
     const overrideMerchantSkuId = Number(data.overrideMerchantSkuId || 0);
+    const overrideCombineSkuId = Number(data.overrideCombineSkuId || 0);
     const overrideWarehouseId = Number(data.overrideWarehouseId || 0);
     const hasMerchantSkuOverride = Number.isInteger(overrideMerchantSkuId) && overrideMerchantSkuId > 0;
+    const hasCombineSkuOverride = Number.isInteger(overrideCombineSkuId) && overrideCombineSkuId > 0;
+    const hasSkuOverride = hasMerchantSkuOverride || hasCombineSkuOverride;
 
     if (!platformMappingId || !platformOrderId) {
         const err = new Error('platformMappingId and platformOrderId are required');
@@ -524,10 +528,10 @@ const packReservedStock = async (user, data) => {
 
     const mapping = await resolveActivePlatformMapping(user, platformMappingId);
     const where = saleLineWhere({ platformMappingId, platformOrderId, platformOrderItemId });
-    const warehouseId = hasMerchantSkuOverride ? overrideWarehouseId : mapping.fulfillment_warehouse_id;
+    const warehouseId = hasSkuOverride ? overrideWarehouseId : mapping.fulfillment_warehouse_id;
 
     if (!warehouseId) {
-        const err = new Error(hasMerchantSkuOverride ? 'Replacement warehouse is required' : 'Platform SKU mapping is missing fulfillment warehouse');
+        const err = new Error(hasSkuOverride ? 'Replacement warehouse is required' : 'Platform SKU mapping is missing fulfillment warehouse');
         err.statusCode = 400;
         throw err;
     }
@@ -548,9 +552,20 @@ const packReservedStock = async (user, data) => {
     const affectedSkus = [];
     let saleLineId = currentLine?.id || null;
     const platformLabel = mapping.platformStore?.platform || 'platform';
-    const packMerchantSkuId = hasMerchantSkuOverride ? overrideMerchantSkuId : mapping.merchant_sku_id;
+    const packMerchantSkuId = hasCombineSkuOverride
+        ? null
+        : hasMerchantSkuOverride
+            ? overrideMerchantSkuId
+            : mapping.merchant_sku_id;
+    const packCombineSkuId = hasCombineSkuOverride
+        ? overrideCombineSkuId
+        : hasMerchantSkuOverride
+            ? null
+            : mapping.combine_sku_id;
     const packNotes = hasMerchantSkuOverride
         ? `Packed replacement SKU ${overrideMerchantSkuId} for ${platformLabel} order ${platformOrderId}`
+        : hasCombineSkuOverride
+            ? `Packed replacement combine SKU ${overrideCombineSkuId} for ${platformLabel} order ${platformOrderId}`
         : undefined;
 
     await sequelize.transaction(async (t) => {
@@ -563,47 +578,15 @@ const packReservedStock = async (user, data) => {
             return;
         }
 
-        if (packMerchantSkuId) {
-            const stockRecord = await lockStockRecord({
-                SkuWarehouseStock,
-                merchantSkuId: packMerchantSkuId,
-                warehouseId,
-                user,
-                transaction: t,
-            });
-            const result = await packOneStockRecord({
-                stockRecord,
-                quantity: quantitySold,
-                merchantSkuId: packMerchantSkuId,
-                warehouseId,
-                platformOrderId,
-                platformLabel,
-                user,
-                transaction: t,
-                notes: packNotes,
-            });
-            deductions.push(hasMerchantSkuOverride ? { ...result, overrideApplied: true } : result);
-            affectedSkus.push(packMerchantSkuId);
-
-            if (!hasMerchantSkuOverride) {
-                const mirroredSkuIds = await mirrorStockChange(
-                    t,
-                    user,
-                    packMerchantSkuId,
-                    -quantitySold,
-                    warehouseId
-                );
-                affectedSkus.push(...mirroredSkuIds);
-            }
-        } else if (!hasMerchantSkuOverride && mapping.combine_sku_id) {
+        if (packCombineSkuId) {
             const items = await CombineSkuItem.findAll({
-                where: { combine_sku_id: mapping.combine_sku_id, company_id: user.companyId },
+                where: { combine_sku_id: packCombineSkuId, company_id: user.companyId },
                 attributes: ['merchant_sku_id', 'quantity'],
                 transaction: t,
             });
 
             if (!items.length) {
-                const err = new Error(`Combined SKU ${mapping.combine_sku_id} has no child SKU items`);
+                const err = new Error(`Combined SKU ${packCombineSkuId} has no child SKU items`);
                 err.statusCode = 400;
                 throw err;
             }
@@ -626,10 +609,42 @@ const packReservedStock = async (user, data) => {
                     platformLabel,
                     user,
                     transaction: t,
-                    notes: `Part of combine SKU ${mapping.combine_sku_id} — packed ${quantitySold} units × ratio ${item.quantity}`,
+                    notes: packNotes || `Part of combine SKU ${packCombineSkuId} - packed ${quantitySold} units x ratio ${item.quantity}`,
                 });
-                deductions.push({ ...result, combineRatio: item.quantity });
+                deductions.push({ ...result, combineRatio: item.quantity, overrideApplied: hasCombineSkuOverride });
                 affectedSkus.push(item.merchant_sku_id);
+            }
+        } else if (packMerchantSkuId) {
+            const stockRecord = await lockStockRecord({
+                SkuWarehouseStock,
+                merchantSkuId: packMerchantSkuId,
+                warehouseId,
+                user,
+                transaction: t,
+            });
+            const result = await packOneStockRecord({
+                stockRecord,
+                quantity: quantitySold,
+                merchantSkuId: packMerchantSkuId,
+                warehouseId,
+                platformOrderId,
+                platformLabel,
+                user,
+                transaction: t,
+                notes: packNotes,
+            });
+            deductions.push(hasMerchantSkuOverride ? { ...result, overrideApplied: true } : result);
+            affectedSkus.push(packMerchantSkuId);
+
+            if (!hasSkuOverride) {
+                const mirroredSkuIds = await mirrorStockChange(
+                    t,
+                    user,
+                    packMerchantSkuId,
+                    -quantitySold,
+                    warehouseId
+                );
+                affectedSkus.push(...mirroredSkuIds);
             }
         } else {
             const err = new Error('Platform SKU mapping must link to either a merchant SKU or combine SKU');
@@ -659,7 +674,7 @@ const packReservedStock = async (user, data) => {
         }
     });
 
-    await queueCombineSkuRecomputeForAffectedSkus(user.companyId, affectedSkus, mapping.combine_sku_id || null);
+    await queueCombineSkuRecomputeForAffectedSkus(user.companyId, affectedSkus, packCombineSkuId || null);
 
     return {
         alreadyPacked: false,
@@ -667,10 +682,11 @@ const packReservedStock = async (user, data) => {
         saleLineId,
         platformOrderId,
         deductions,
-        combineSkuId: mapping.combine_sku_id || null,
-        overrideApplied: hasMerchantSkuOverride,
+        combineSkuId: packCombineSkuId || null,
+        overrideApplied: hasSkuOverride,
         overrideMerchantSkuId: hasMerchantSkuOverride ? overrideMerchantSkuId : null,
-        overrideWarehouseId: hasMerchantSkuOverride ? overrideWarehouseId : null,
+        overrideCombineSkuId: hasCombineSkuOverride ? overrideCombineSkuId : null,
+        overrideWarehouseId: hasSkuOverride ? overrideWarehouseId : null,
     };
 };
 
@@ -682,7 +698,12 @@ const getStockLedger = async (user, { merchantSkuId, warehouseId, skuName, movem
 
     const where = { company_id: user.companyId };
     if (merchantSkuId) where.merchant_sku_id = merchantSkuId;
-    if (warehouseId) where.warehouse_id = warehouseId;
+    if (warehouseId) {
+        await assertWarehousePermission(user, warehouseId);
+        where.warehouse_id = warehouseId;
+    } else {
+        Object.assign(where, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
     if (movementType) where.movement_type = movementType;  // direct column filter
     if (startDate || endDate) {
         where.created_at = {};

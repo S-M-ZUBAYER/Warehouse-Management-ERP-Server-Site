@@ -19,7 +19,8 @@ module.exports = (sequelize) => {
         original_platform_mapping_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
         original_merchant_sku_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
         original_combine_sku_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
-        replacement_merchant_sku_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
+        replacement_merchant_sku_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
+        replacement_combine_sku_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
         replacement_warehouse_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
         quantity: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 1 },
         reason: { type: DataTypes.STRING(100), allowNull: true },
@@ -44,6 +45,7 @@ module.exports = (sequelize) => {
             { fields: ['platform', 'platform_order_id'], name: 'idx_pois_platform_order' },
             { fields: ['original_platform_mapping_id'], name: 'idx_pois_original_mapping' },
             { fields: ['replacement_merchant_sku_id'], name: 'idx_pois_replacement_sku' },
+            { fields: ['replacement_combine_sku_id'], name: 'idx_pois_replacement_combine_sku' },
             { fields: ['status'], name: 'idx_pois_status' },
         ],
     });
@@ -55,6 +57,7 @@ module.exports = (sequelize) => {
         PlatformOrderItemSkuOverride.belongsTo(models.MerchantSku, { foreignKey: 'original_merchant_sku_id', as: 'originalMerchantSku' });
         PlatformOrderItemSkuOverride.belongsTo(models.CombineSku, { foreignKey: 'original_combine_sku_id', as: 'originalCombineSku' });
         PlatformOrderItemSkuOverride.belongsTo(models.MerchantSku, { foreignKey: 'replacement_merchant_sku_id', as: 'replacementMerchantSku' });
+        PlatformOrderItemSkuOverride.belongsTo(models.CombineSku, { foreignKey: 'replacement_combine_sku_id', as: 'replacementCombineSku' });
         PlatformOrderItemSkuOverride.belongsTo(models.Warehouse, { foreignKey: 'replacement_warehouse_id', as: 'replacementWarehouse' });
     };
 

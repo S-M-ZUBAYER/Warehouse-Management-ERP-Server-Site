@@ -1,9 +1,11 @@
-'use strict';
+﻿'use strict';
 
 const axios = require('axios');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const redis = require('../../config/redis');
+const { applyWarehouseScope, assertWarehousePermission } = require('../../utils/permissions');
+const sellableSkuStock = require('../shared/sellableSkuStock');
 
 const SHOPEE_STOCK_UPDATE_BASE_URL = process.env.SHOPEE_STOCK_UPDATE_BASE_URL || 'https://grozziie.zjweiting.com:3091';
 const TIKTOK_STOCK_UPDATE_BASE_URL = process.env.TIKTOK_STOCK_UPDATE_BASE_URL || 'https://grozziie.zjweiting.com:3091';
@@ -335,23 +337,33 @@ const syncOutboundMappedPlatformStock = async ({ companyId, merchantSkuIds = [],
 
 const reduceOutboundMappedPlatformStock = async ({ companyId, items = [] }) => {
     const deductionByMerchantSku = new Map();
+    const deductionByCombineSku = new Map();
     for (const item of items) {
         const merchantSkuId = Number(item.merchantSkuId || item.merchant_sku_id);
+        const combineSkuId = Number(item.combineSkuId || item.combine_sku_id);
         const quantity = Number(item.quantity || item.qty || item.qty_expected || 0);
-        if (!Number.isInteger(merchantSkuId) || merchantSkuId <= 0 || !Number.isFinite(quantity) || quantity <= 0) continue;
-        deductionByMerchantSku.set(merchantSkuId, (deductionByMerchantSku.get(merchantSkuId) || 0) + quantity);
+        if (!Number.isFinite(quantity) || quantity <= 0) continue;
+        if (Number.isInteger(merchantSkuId) && merchantSkuId > 0) {
+            deductionByMerchantSku.set(merchantSkuId, (deductionByMerchantSku.get(merchantSkuId) || 0) + quantity);
+        } else if (Number.isInteger(combineSkuId) && combineSkuId > 0) {
+            deductionByCombineSku.set(combineSkuId, (deductionByCombineSku.get(combineSkuId) || 0) + quantity);
+        }
     }
 
     const merchantSkuIds = [...deductionByMerchantSku.keys()];
-    if (!merchantSkuIds.length) return { total: 0, synced: 0, failed: 0, results: [] };
+    const combineSkuIds = [...deductionByCombineSku.keys()];
+    if (!merchantSkuIds.length && !combineSkuIds.length) return { total: 0, synced: 0, failed: 0, results: [] };
 
     const { PlatformSkuMapping, PlatformStore, PlatformProduct } = require('../../models');
+    const conditions = [];
+    if (merchantSkuIds.length) conditions.push({ merchant_sku_id: { [Op.in]: merchantSkuIds } });
+    if (combineSkuIds.length) conditions.push({ combine_sku_id: { [Op.in]: combineSkuIds } });
     const mappings = await PlatformSkuMapping.findAll({
         where: {
             company_id: companyId,
             is_active: true,
             deleted_at: null,
-            merchant_sku_id: { [Op.in]: merchantSkuIds },
+            [Op.or]: conditions,
         },
         include: [{
             model: PlatformStore,
@@ -376,7 +388,9 @@ const reduceOutboundMappedPlatformStock = async ({ companyId, items = [] }) => {
 
     const results = await Promise.all(mappings.map(async (mapping) => {
         const platform = mapping.platformStore?.platform;
-        const reduceQty = deductionByMerchantSku.get(Number(mapping.merchant_sku_id)) || 0;
+        const reduceQty = mapping.merchant_sku_id
+            ? deductionByMerchantSku.get(Number(mapping.merchant_sku_id)) || 0
+            : deductionByCombineSku.get(Number(mapping.combine_sku_id)) || 0;
         const result = await callPlatformReduceStock(mapping, platform, reduceQty);
 
         if (result.success) {
@@ -436,6 +450,7 @@ const reduceOutboundMappedPlatformStock = async ({ companyId, items = [] }) => {
             mappingId: mapping.id,
             platform,
             merchantSkuId: mapping.merchant_sku_id,
+            combineSkuId: mapping.combine_sku_id,
             reduced: reduceQty,
             platformStockBefore: result.previousQuantity ?? null,
             platformStockAfter: result.newQuantity ?? null,
@@ -505,7 +520,7 @@ const hydrateOutboundStockAvailability = async (companyId, orders) => {
 };
 
 const getOutboundOrders = async (user, filters = {}) => {
-    const { OutboundOrder, OutboundOrderLine, MerchantSku, Warehouse } = require('../../models');
+    const { OutboundOrder, OutboundOrderLine, MerchantSku, CombineSku, Warehouse } = require('../../models');
     const {
         page = 1,
         limit = 20,
@@ -519,7 +534,12 @@ const getOutboundOrders = async (user, filters = {}) => {
     } = filters;
 
     const where = { company_id: user.companyId, deleted_at: null };
-    if (warehouseId && warehouseId !== 'all') where.warehouse_id = warehouseId;
+    if (warehouseId && warehouseId !== 'all') {
+        await assertWarehousePermission(user, warehouseId);
+        where.warehouse_id = warehouseId;
+    } else {
+        Object.assign(where, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
     if (status && status !== 'all') where.status = status;
     if (search) {
         where[Op.or] = [
@@ -557,6 +577,10 @@ const getOutboundOrders = async (user, filters = {}) => {
                     model: MerchantSku,
                     as: 'merchantSku',
                     attributes: ['id', 'sku_name', 'sku_title', 'image_url'],
+                }, {
+                    model: CombineSku,
+                    as: 'combineSku',
+                    attributes: ['id', 'combine_name', 'combine_sku_code', 'computed_quantity'],
                 }],
             },
         ],
@@ -580,7 +604,7 @@ const getOutboundOrders = async (user, filters = {}) => {
 };
 
 const getOutboundOrderById = async (user, outboundOrderId) => {
-    const { OutboundOrder, OutboundOrderLine, MerchantSku, Warehouse } = require('../../models');
+    const { OutboundOrder, OutboundOrderLine, MerchantSku, CombineSku, Warehouse } = require('../../models');
     const order = await OutboundOrder.findOne({
         where: { id: outboundOrderId, company_id: user.companyId, deleted_at: null },
         include: [
@@ -592,6 +616,10 @@ const getOutboundOrderById = async (user, outboundOrderId) => {
                     model: MerchantSku,
                     as: 'merchantSku',
                     attributes: ['id', 'sku_name', 'sku_title', 'image_url', 'price'],
+                }, {
+                    model: CombineSku,
+                    as: 'combineSku',
+                    attributes: ['id', 'combine_name', 'combine_sku_code', 'selling_price', 'weight', 'computed_quantity'],
                 }],
             },
         ],
@@ -613,32 +641,41 @@ const validateOutboundLines = async (user, warehouseId, lines) => {
         throw err;
     }
 
+    const refs = lines.map((line) => sellableSkuStock.getLineSkuRef(line));
+    if (new Set(refs.map((ref) => ref.key)).size !== refs.length) {
+        const err = new Error('Duplicate SKUs in lines - each SKU may appear only once per outbound');
+        err.statusCode = 400;
+        throw err;
+    }
+
     const { MerchantSku, SkuWarehouseStock } = require('../../models');
-    const merchantSkuIds = lines.map((line) => Number(line.merchantSkuId));
-    if (new Set(merchantSkuIds).size !== merchantSkuIds.length) {
-        const err = new Error('Duplicate merchant SKUs in lines - each SKU may appear only once per outbound');
+    const merchantSkuIds = refs.filter((ref) => ref.kind === 'merchant').map((ref) => ref.merchantSkuId);
+    const combineSkuIds = refs.filter((ref) => ref.kind === 'combine').map((ref) => ref.combineSkuId);
+    if (combineSkuIds.length) {
+        const err = new Error('Combine SKU cannot be used for outbound');
         err.statusCode = 400;
         throw err;
     }
 
-    const validSkus = await MerchantSku.findAll({
-        where: {
-            id: { [Op.in]: merchantSkuIds },
-            company_id: user.companyId,
-            warehouse_id: warehouseId,
-            status: 'active',
-            deleted_at: null,
-        },
-        attributes: ['id'],
-        raw: true,
-    });
-    if (validSkus.length !== merchantSkuIds.length) {
-        const err = new Error('One or more merchant SKUs are invalid or do not belong to the selected warehouse');
-        err.statusCode = 400;
-        throw err;
+    if (merchantSkuIds.length) {
+        const validSkus = await MerchantSku.findAll({
+            where: {
+                id: { [Op.in]: merchantSkuIds },
+                company_id: user.companyId,
+                status: 'active',
+                deleted_at: null,
+            },
+            attributes: ['id'],
+            raw: true,
+        });
+        if (validSkus.length !== merchantSkuIds.length) {
+            const err = new Error('One or more merchant SKUs are invalid or inactive');
+            err.statusCode = 400;
+            throw err;
+        }
     }
 
-    const stocks = await SkuWarehouseStock.findAll({
+    const stocks = merchantSkuIds.length ? await SkuWarehouseStock.findAll({
         where: {
             company_id: user.companyId,
             warehouse_id: warehouseId,
@@ -646,30 +683,33 @@ const validateOutboundLines = async (user, warehouseId, lines) => {
         },
         attributes: ['merchant_sku_id', 'qty_on_hand', 'qty_reserved'],
         raw: true,
-    });
+    }) : [];
     const stockMap = new Map(stocks.map((stock) => [Number(stock.merchant_sku_id), stock]));
 
-    for (const line of lines) {
-        const merchantSkuId = Number(line.merchantSkuId);
+    for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        const ref = refs[index];
         const requested = Number(line.qtyExpected);
-        const stock = stockMap.get(merchantSkuId);
-        const available = Math.max(0, Number(stock?.qty_on_hand || 0) - Number(stock?.qty_reserved || 0));
         if (!Number.isInteger(requested) || requested < 1) {
-            const err = new Error(`Quantity for merchant SKU ${merchantSkuId} must be at least 1`);
+            const err = new Error(`Quantity for ${ref.kind} SKU must be at least 1`);
             err.statusCode = 400;
             throw err;
         }
-        if (requested > available) {
-            const err = new Error(`Insufficient available stock for merchant SKU ${merchantSkuId}: available ${available}, requested ${requested}`);
-            err.statusCode = 400;
-            throw err;
+        if (ref.kind === 'merchant') {
+            const stock = stockMap.get(ref.merchantSkuId);
+            const available = Math.max(0, Number(stock?.qty_on_hand || 0) - Number(stock?.qty_reserved || 0));
+            if (requested > available) {
+                const err = new Error(`Insufficient available stock for merchant SKU ${ref.merchantSkuId}: available ${available}, requested ${requested}`);
+                err.statusCode = 400;
+                throw err;
+            }
         }
     }
 };
-
 const createOutboundOrder = async (user, data) => {
     const { OutboundOrder, OutboundOrderLine, Warehouse } = require('../../models');
     const { warehouseId, supplierName, supplierReference, receivingWarehouseName, receivingWarehouseAddress, notes, lines } = data;
+    await assertWarehousePermission(user, warehouseId, { canEdit: true });
 
     const warehouse = await Warehouse.findOne({ where: { id: warehouseId, company_id: user.companyId } });
     if (!warehouse) {
@@ -697,7 +737,8 @@ const createOutboundOrder = async (user, data) => {
         await OutboundOrderLine.bulkCreate(lines.map((line) => ({
             company_id: user.companyId,
             outbound_order_id: order.id,
-            merchant_sku_id: line.merchantSkuId,
+            merchant_sku_id: line.merchantSkuId || null,
+            combine_sku_id: line.combineSkuId || null,
             qty_expected: line.qtyExpected,
             qty_received: 0,
             unit_cost: line.unitCost || null,
@@ -750,8 +791,9 @@ const updateDraftOutbound = async (user, outboundOrderId, data) => {
             await OutboundOrderLine.bulkCreate(data.lines.map((line) => ({
                 company_id: user.companyId,
                 outbound_order_id: outboundOrderId,
-                merchant_sku_id: line.merchantSkuId,
-                qty_expected: line.qtyExpected,
+                merchant_sku_id: line.merchantSkuId || null,
+            combine_sku_id: line.combineSkuId || null,
+            qty_expected: line.qtyExpected,
                 qty_received: 0,
                 unit_cost: line.unitCost || null,
                 currency: line.currency || null,
@@ -777,12 +819,12 @@ const deleteDraftOutbound = async (user, outboundOrderId) => {
         err.statusCode = 400;
         throw err;
     }
-    await order.destroy();
+    await order.destroy({ force: true });
     return { id: Number(outboundOrderId) };
 };
 
 const shipOutboundOrder = async (user, outboundOrderId, data) => {
-    const { OutboundOrder, OutboundOrderLine, SkuWarehouseStock, StockLedgerEntry } = require('../../models');
+    const { OutboundOrder, OutboundOrderLine } = require('../../models');
     const order = await OutboundOrder.findOne({
         where: { id: outboundOrderId, company_id: user.companyId, deleted_at: null },
         include: [{ model: OutboundOrderLine, as: 'lines' }],
@@ -804,45 +846,26 @@ const shipOutboundOrder = async (user, outboundOrderId, data) => {
     }
 
     const affectedSkuIds = [];
+    const directCombineSkuIds = [];
     const platformDeductionItems = [];
     await sequelize.transaction(async (t) => {
         for (const line of order.lines) {
-            const stockRecord = await SkuWarehouseStock.findOne({
-                where: {
-                    company_id: user.companyId,
-                    merchant_sku_id: line.merchant_sku_id,
-                    warehouse_id: order.warehouse_id,
-                },
-                lock: t.LOCK.UPDATE,
+            const quantity = Number(line.qty_expected);
+            const result = await sellableSkuStock.deductSellableStock({
+                user,
+                companyId: user.companyId,
+                line,
+                warehouseId: order.warehouse_id,
+                quantity,
+                referenceType: 'outbound_order',
+                referenceId: order.id,
+                notes: data.trackingNumber ? `Outbound shipped - tracking: ${data.trackingNumber}` : 'Outbound shipped',
+                movementType: 'transfer_out',
                 transaction: t,
             });
-            const available = Math.max(0, Number(stockRecord?.qty_on_hand || 0) - Number(stockRecord?.qty_reserved || 0));
-            if (!stockRecord || Number(line.qty_expected) > available) {
-                const err = new Error(`Insufficient available stock for merchant SKU ${line.merchant_sku_id}: available ${available}, requested ${line.qty_expected}`);
-                err.statusCode = 400;
-                throw err;
-            }
-
-            const newQtyOnHand = Number(stockRecord.qty_on_hand || 0) - Number(line.qty_expected);
-            await stockRecord.update({ qty_on_hand: newQtyOnHand }, { transaction: t });
-            await StockLedgerEntry.create({
-                company_id: user.companyId,
-                merchant_sku_id: line.merchant_sku_id,
-                warehouse_id: order.warehouse_id,
-                sku_warehouse_stock_id: stockRecord.id,
-                movement_type: 'transfer_out',
-                quantity_delta: -Number(line.qty_expected),
-                qty_on_hand_after: newQtyOnHand,
-                reference_type: 'outbound_order',
-                reference_id: String(order.id),
-                notes: data.trackingNumber ? `Outbound shipped - tracking: ${data.trackingNumber}` : 'Outbound shipped',
-                created_by: user.userId,
-            }, { transaction: t });
-            affectedSkuIds.push(line.merchant_sku_id);
-            platformDeductionItems.push({
-                merchantSkuId: line.merchant_sku_id,
-                quantity: Number(line.qty_expected),
-            });
+            result.childDeductions.forEach((item) => affectedSkuIds.push(item.merchantSkuId));
+            if (result.ref.kind === 'combine') directCombineSkuIds.push(result.ref.combineSkuId);
+            platformDeductionItems.push(result.platformDeduction);
         }
 
         await order.update({
@@ -863,28 +886,28 @@ const shipOutboundOrder = async (user, outboundOrderId, data) => {
             console.error('[queueCombineRecompute] Failed to enqueue:', err.message)
             return [];
         });
+    }
 
-        await reduceOutboundMappedPlatformStock({
+    await reduceOutboundMappedPlatformStock({
+        companyId: user.companyId,
+        items: platformDeductionItems,
+    }).catch((err) =>
+        console.error('[reduceOutboundMappedPlatformStock] Failed to reduce outbound mapped platform stock:', err.message)
+    );
+
+    const combineIdsToSync = [...new Set([...affectedCombineSkuIds, ...directCombineSkuIds])];
+    if (combineIdsToSync.length > 0) {
+        await syncOutboundMappedPlatformStock({
             companyId: user.companyId,
-            items: platformDeductionItems,
+            merchantSkuIds: [],
+            combineSkuIds: combineIdsToSync,
         }).catch((err) =>
-            console.error('[reduceOutboundMappedPlatformStock] Failed to reduce outbound mapped platform stock:', err.message)
+            console.error('[syncOutboundMappedPlatformStock] Failed to sync outbound combine mapped platform stock:', err.message)
         );
-
-        if (affectedCombineSkuIds.length > 0) {
-            await syncOutboundMappedPlatformStock({
-                companyId: user.companyId,
-                merchantSkuIds: [],
-                combineSkuIds: affectedCombineSkuIds,
-            }).catch((err) =>
-                console.error('[syncOutboundMappedPlatformStock] Failed to sync outbound combine mapped platform stock:', err.message)
-            );
-        }
     }
 
     return getOutboundOrderById(user, outboundOrderId);
 };
-
 const receiveOutboundOrder = async (user, outboundOrderId, data) => {
     const { OutboundOrder, OutboundOrderLine } = require('../../models');
     const order = await OutboundOrder.findOne({
@@ -937,7 +960,7 @@ const receiveOutboundOrder = async (user, outboundOrderId, data) => {
 const getOutboundDropdowns = async (user) => {
     const { Warehouse } = require('../../models');
     const warehouses = await Warehouse.findAll({
-        where: { company_id: user.companyId, status: 'active' },
+        where: await applyWarehouseScope(user, { company_id: user.companyId, status: 'active' }),
         attributes: ['id', 'name', 'code', 'location', 'city', 'country', 'is_default'],
         order: [['is_default', 'DESC'], ['name', 'ASC']],
     });
@@ -947,7 +970,13 @@ const getOutboundDropdowns = async (user) => {
 const getSkusForOutboundPicker = async (user, { warehouseId, search, page = 1, limit = 20 }) => {
     const { MerchantSku, SkuWarehouseStock } = require('../../models');
     const where = { company_id: user.companyId, status: 'active', deleted_at: null };
-    if (warehouseId) where.warehouse_id = warehouseId;
+    const stockWhere = { company_id: user.companyId };
+    if (warehouseId) {
+        await assertWarehousePermission(user, warehouseId);
+        stockWhere.warehouse_id = Number(warehouseId);
+    } else {
+        Object.assign(stockWhere, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
     if (search) {
         where[Op.or] = [
             { sku_name: { [Op.like]: `%${search}%` } },
@@ -958,46 +987,50 @@ const getSkusForOutboundPicker = async (user, { warehouseId, search, page = 1, l
     const pageNumber = parseInt(page, 10) || 1;
     const pageLimit = parseInt(limit, 10) || 20;
     const offset = (pageNumber - 1) * pageLimit;
-    const { count, rows } = await MerchantSku.findAndCountAll({
+    const merchantResult = await MerchantSku.findAndCountAll({
         where,
-        attributes: ['id', 'sku_name', 'sku_title', 'image_url', 'price', 'warehouse_id'],
+        attributes: ['id', 'sku_name', 'sku_title', 'image_url', 'price', 'warehouse_id', 'weight'],
         include: [{
             model: SkuWarehouseStock,
             as: 'stock',
-            attributes: ['qty_on_hand', 'qty_inbound', 'qty_reserved'],
-            required: false,
-            where: warehouseId ? { warehouse_id: warehouseId } : undefined,
+            attributes: ['qty_on_hand', 'qty_inbound', 'qty_reserved', 'warehouse_id'],
+            required: true,
+            where: stockWhere,
         }],
         order: [['sku_name', 'ASC']],
         limit: pageLimit,
         offset,
     });
 
+    const merchantRows = merchantResult.rows.map((sku) => {
+        const stock = Array.isArray(sku.stock) ? sku.stock[0] : sku.stock;
+        const qtyOnHand = Number(stock?.qty_on_hand || 0);
+        const qtyReserved = Number(stock?.qty_reserved || 0);
+        return {
+            ...sku.toJSON(),
+            sku_type: 'merchant',
+            row_id: `merchant:${sku.id}`,
+            qty_on_hand: qtyOnHand,
+            total_available: qtyOnHand,
+            qty_inbound: Number(stock?.qty_inbound || 0),
+            qty_reserved: qtyReserved,
+            lock_quantity: qtyReserved,
+            qty_available: Math.max(0, qtyOnHand - qtyReserved),
+            available_for_platform: Math.max(0, qtyOnHand - qtyReserved),
+        };
+    });
+
+    const data = merchantRows;
     return {
-        data: rows.map((sku) => {
-            const stock = Array.isArray(sku.stock) ? sku.stock[0] : sku.stock;
-            const qtyOnHand = Number(stock?.qty_on_hand || 0);
-            const qtyReserved = Number(stock?.qty_reserved || 0);
-            return {
-                ...sku.toJSON(),
-                qty_on_hand: qtyOnHand,
-                total_available: qtyOnHand,
-                qty_inbound: Number(stock?.qty_inbound || 0),
-                qty_reserved: qtyReserved,
-                lock_quantity: qtyReserved,
-                qty_available: Math.max(0, qtyOnHand - qtyReserved),
-                available_for_platform: Math.max(0, qtyOnHand - qtyReserved),
-            };
-        }),
+        data,
         pagination: {
-            total: count,
+            total: merchantResult.count,
             page: pageNumber,
             limit: pageLimit,
-            totalPages: Math.ceil(count / pageLimit),
+            totalPages: Math.ceil(merchantResult.count / pageLimit),
         },
     };
 };
-
 module.exports = {
     getOutboundOrders,
     getOutboundOrderById,
@@ -1009,3 +1042,8 @@ module.exports = {
     getOutboundDropdowns,
     getSkusForOutboundPicker,
 };
+
+
+
+
+

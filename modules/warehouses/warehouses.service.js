@@ -3,6 +3,7 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const redis = require('../../config/redis');
+const { applyWarehouseScope, assertWarehousePermission } = require('../../utils/permissions');
 
 // Redis cache key helper
 const cacheKey = (companyId, suffix = '') =>
@@ -37,13 +38,13 @@ const getWarehouses = async (user, filters = {}) => {
     const { page = 1, limit = 20, status, attribute, search } = filters;
 
     // Try cache for simple unfiltered list
-    const key = cacheKey(user.companyId, `with-total-sku:p${page}:l${limit}`);
+    const key = cacheKey(user.companyId, `with-total-sku:u${user.userId || 'owner'}:p${page}:l${limit}`);
     if (!status && !attribute && !search) {
         const cached = await redis.get(key);
         if (cached) return JSON.parse(cached);
     }
 
-    const where = { company_id: user.companyId };
+    const where = await applyWarehouseScope(user, { company_id: user.companyId });
     if (status) where.status = status;
     if (attribute) where.attribute = attribute;
     if (search) {
@@ -129,6 +130,7 @@ const getWarehouses = async (user, filters = {}) => {
 // ─── Get Single Warehouse ─────────────────────────────────────────────────────
 const getWarehouseById = async (user, warehouseId) => {
     const { Warehouse } = require('../../models');
+    await assertWarehousePermission(user, warehouseId);
 
     const warehouse = await Warehouse.findOne({
         where: { id: warehouseId, company_id: user.companyId },
@@ -147,7 +149,6 @@ const getWarehouseById = async (user, warehouseId) => {
 const createWarehouse = async (user, data) => {
     const { Warehouse } = require('../../models');
     const { name, attribute, managerName, phone, location, city, country, status } = data;
-
     // ── Duplicate name check ──────────────────────────────────────────────
     const existing = await Warehouse.findOne({
         where: { company_id: user.companyId, name: name.trim() },
@@ -189,6 +190,7 @@ const createWarehouse = async (user, data) => {
 // ─── Update Warehouse ─────────────────────────────────────────────────────────
 const updateWarehouse = async (user, warehouseId, data) => {
     const { Warehouse } = require('../../models');
+    await assertWarehousePermission(user, warehouseId, { canEdit: true });
 
     const warehouse = await Warehouse.findOne({
         where: { id: warehouseId, company_id: user.companyId },
@@ -235,6 +237,7 @@ const updateWarehouse = async (user, warehouseId, data) => {
 // ─── Delete Warehouse ─────────────────────────────────────────────────────────
 const deleteWarehouse = async (user, warehouseId) => {
     const { Warehouse } = require('../../models');
+    await assertWarehousePermission(user, warehouseId, { canEdit: true });
 
     const warehouse = await Warehouse.findOne({
         where: { id: warehouseId, company_id: user.companyId },
@@ -265,6 +268,7 @@ const deleteWarehouse = async (user, warehouseId) => {
 // ─── Set Default Warehouse ────────────────────────────────────────────────────
 const setDefaultWarehouse = async (user, warehouseId) => {
     const { Warehouse } = require('../../models');
+    await assertWarehousePermission(user, warehouseId, { canEdit: true });
 
     const warehouse = await Warehouse.findOne({
         where: { id: warehouseId, company_id: user.companyId, status: 'active' },

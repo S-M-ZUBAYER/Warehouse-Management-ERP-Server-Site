@@ -1,15 +1,15 @@
-'use strict';
+﻿'use strict';
 
 /**
  * combineskus.service.js  (UPDATED)
  *
  * Changes from original:
- *  1. createCombineSku — after creating items, immediately runs initial
+ *  1. createCombineSku â€” after creating items, immediately runs initial
  *     computed_quantity calculation (MIN logic) so the response is correct.
- *  2. updateCombineSku — re-runs computed_quantity after items change.
- *  3. getCombineSkus / getCombineSkuById — attaches computed_quantity
+ *  2. updateCombineSku â€” re-runs computed_quantity after items change.
+ *  3. getCombineSkus / getCombineSkuById â€” attaches computed_quantity
  *     and child stock availability to the response.
- *  4. getMerchantSkusForPicker — now returns real available_in_inventory
+ *  4. getMerchantSkusForPicker â€” now returns real available_in_inventory
  *     from SkuWarehouseStock.
  *  5. Everything else is identical to your original.
  */
@@ -17,11 +17,12 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const redis = require('../../config/redis');
+const { applyWarehouseScope, assertWarehousePermission } = require('../../utils/permissions');
 
 const cacheKey = (companyId, suffix = '') =>
     `company:${companyId}:cache:combine_skus${suffix ? ':' + suffix : ''}`;
 
-// ─── Helper: recompute a single combine SKU's computed_quantity ───────────────
+// â”€â”€â”€ Helper: recompute a single combine SKU's computed_quantity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Inline version (used directly after create/update, inside or outside a transaction)
 const _recompute = async (companyId, combineSkuId, t = null) => {
     const { CombineSku, CombineSkuItem, SkuWarehouseStock } = require('../../models');
@@ -53,7 +54,7 @@ const _recompute = async (companyId, combineSkuId, t = null) => {
 
         const result = await SkuWarehouseStock.findOne({
             where: stockWhere,
-            attributes: [[sequelize.fn('SUM', sequelize.col('qty_on_hand')), 'total']],
+            attributes: [[sequelize.literal('SUM(GREATEST(COALESCE(qty_on_hand, 0) - COALESCE(qty_reserved, 0), 0))'), 'total']],
             raw: true,
             ...(t ? { transaction: t } : {}),
         });
@@ -71,7 +72,7 @@ const _recompute = async (companyId, combineSkuId, t = null) => {
     return computedQty;
 };
 
-// ─── List Combine SKUs ─────────────────────────────────────────────────────────
+// â”€â”€â”€ List Combine SKUs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const getCombineSkus = async (user, filters = {}) => {
     const { CombineSku, CombineSkuItem, MerchantSku, Warehouse, SkuWarehouseStock } = require('../../models');
 
@@ -82,7 +83,12 @@ const getCombineSkus = async (user, filters = {}) => {
     } = filters;
 
     const where = { company_id: user.companyId, deleted_at: null };
-    if (warehouseId && warehouseId !== 'all') where.warehouse_id = warehouseId;
+    if (warehouseId && warehouseId !== 'all') {
+        await assertWarehousePermission(user, warehouseId);
+        where.warehouse_id = warehouseId;
+    } else {
+        Object.assign(where, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
     if (status && status !== 'all') where.status = status;
     if (search) {
         where[Op.or] = [
@@ -107,7 +113,7 @@ const getCombineSkus = async (user, filters = {}) => {
                     attributes: ['id', 'sku_name', 'sku_title', 'image_url', 'status'],
                     include: [{
                         model: SkuWarehouseStock, as: 'stock',
-                        attributes: ['qty_on_hand', 'qty_reserved', 'qty_inbound'],
+                        attributes: ['warehouse_id', 'qty_on_hand', 'qty_reserved', 'qty_inbound'],
                         required: false,
                     }],
                 }],
@@ -135,7 +141,7 @@ const getCombineSkus = async (user, filters = {}) => {
     };
 };
 
-// ─── Get Single Combine SKU ────────────────────────────────────────────────────
+// â”€â”€â”€ Get Single Combine SKU â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const getCombineSkuById = async (user, combineSkuId) => {
     const { CombineSku, CombineSkuItem, MerchantSku, Warehouse, SkuWarehouseStock } = require('../../models');
 
@@ -163,6 +169,7 @@ const getCombineSkuById = async (user, combineSkuId) => {
         err.statusCode = 404;
         throw err;
     }
+    if (combineSku.warehouse_id) await assertWarehousePermission(user, combineSku.warehouse_id);
 
     const computedQty = await _recompute(user.companyId, combineSkuId);
     combineSku.setDataValue('computed_quantity', computedQty);
@@ -170,11 +177,18 @@ const getCombineSkuById = async (user, combineSkuId) => {
     return combineSku;
 };
 
-// ─── SKU picker (real stock) ───────────────────────────────────────────────────
+// â”€â”€â”€ SKU picker (real stock) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const getMerchantSkusForPicker = async (user, { search, warehouseId, page = 1, limit = 20 }) => {
     const { MerchantSku, Warehouse, SkuWarehouseStock } = require('../../models');
 
     const where = { company_id: user.companyId, status: 'active', deleted_at: null };
+    const stockWhere = { company_id: user.companyId };
+    if (warehouseId) {
+        await assertWarehousePermission(user, warehouseId);
+        stockWhere.warehouse_id = Number(warehouseId);
+    } else {
+        Object.assign(stockWhere, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
     if (search) {
         where[Op.or] = [
             { sku_name: { [Op.like]: `%${search}%` } },
@@ -191,10 +205,9 @@ const getMerchantSkusForPicker = async (user, { search, warehouseId, page = 1, l
             { model: Warehouse, as: 'warehouse', attributes: ['id', 'name'], required: false },
             {
                 model: SkuWarehouseStock, as: 'stock',
-                attributes: ['qty_on_hand', 'qty_reserved'],
-                required: false,
-                // If warehouseId filter passed, only show stock for that warehouse
-                where: warehouseId ? { warehouse_id: warehouseId } : undefined,
+                attributes: ['qty_on_hand', 'qty_reserved', 'warehouse_id'],
+                required: true,
+                where: stockWhere,
             },
         ],
         order: [['sku_name', 'ASC']],
@@ -226,7 +239,7 @@ const getMerchantSkusForPicker = async (user, { search, warehouseId, page = 1, l
     };
 };
 
-// ─── Create Combine SKU — with initial computed_quantity ──────────────────────
+// â”€â”€â”€ Create Combine SKU â€” with initial computed_quantity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const createCombineSku = async (user, data) => {
     const { CombineSku, CombineSkuItem, MerchantSku, Warehouse } = require('../../models');
 
@@ -259,6 +272,7 @@ const createCombineSku = async (user, data) => {
 
     // Validate warehouse
     if (warehouseId) {
+        await assertWarehousePermission(user, warehouseId, { canEdit: true });
         const wh = await Warehouse.findOne({ where: { id: warehouseId, company_id: user.companyId } });
         if (!wh) {
             const err = new Error('Invalid warehouse');
@@ -306,7 +320,7 @@ const createCombineSku = async (user, data) => {
     return getCombineSkuById(user, result.id);
 };
 
-// ─── Update Combine SKU — re-runs computed_quantity if items changed ──────────
+// â”€â”€â”€ Update Combine SKU â€” re-runs computed_quantity if items changed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const updateCombineSku = async (user, combineSkuId, data) => {
     const { CombineSku, CombineSkuItem, MerchantSku } = require('../../models');
 
@@ -318,6 +332,7 @@ const updateCombineSku = async (user, combineSkuId, data) => {
         err.statusCode = 404;
         throw err;
     }
+    if (combineSku.warehouse_id) await assertWarehousePermission(user, combineSku.warehouse_id, { canEdit: true });
 
     const itemsChanged = data.items && data.items.length > 0;
 
@@ -332,7 +347,10 @@ const updateCombineSku = async (user, combineSkuId, data) => {
         if (data.length !== undefined) updates.length = data.length;
         if (data.width !== undefined) updates.width = data.width;
         if (data.height !== undefined) updates.height = data.height;
-        if (data.warehouseId !== undefined) updates.warehouse_id = data.warehouseId;
+        if (data.warehouseId !== undefined) {
+            await assertWarehousePermission(user, data.warehouseId, { canEdit: true });
+            updates.warehouse_id = data.warehouseId;
+        }
         if (data.status !== undefined) updates.status = data.status;
 
         if (Object.keys(updates).length > 0) await combineSku.update(updates, { transaction: t });
@@ -373,7 +391,7 @@ const updateCombineSku = async (user, combineSkuId, data) => {
     return getCombineSkuById(user, combineSkuId);
 };
 
-// ─── Delete (soft) — unchanged from original ──────────────────────────────────
+// â”€â”€â”€ Delete (soft) â€” unchanged from original â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const deleteCombineSku = async (user, combineSkuId) => {
     const { CombineSku } = require('../../models');
 
@@ -385,6 +403,7 @@ const deleteCombineSku = async (user, combineSkuId) => {
         err.statusCode = 404;
         throw err;
     }
+    if (combineSku.warehouse_id) await assertWarehousePermission(user, combineSku.warehouse_id, { canEdit: true });
 
     await combineSku.destroy();
     await redis.flushByPattern(cacheKey(user.companyId, '*'));
@@ -398,3 +417,4 @@ module.exports = {
     updateCombineSku,
     deleteCombineSku,
 };
+

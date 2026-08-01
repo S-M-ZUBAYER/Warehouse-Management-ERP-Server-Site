@@ -6,6 +6,7 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const redis = require('../../config/redis');
+const { applyWarehouseScope, assertWarehousePermission } = require('../../utils/permissions');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,7 +79,12 @@ const getInboundOrders = async (user, filters = {}) => {
 
     const where = { company_id: user.companyId, deleted_at: null };
 
-    if (warehouseId && warehouseId !== 'all') where.warehouse_id = warehouseId;
+    if (warehouseId && warehouseId !== 'all') {
+        await assertWarehousePermission(user, warehouseId);
+        where.warehouse_id = warehouseId;
+    } else {
+        Object.assign(where, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
     if (status && status !== 'all') where.status = status;
     if (search) {
         where[Op.or] = [
@@ -161,6 +167,7 @@ const createInboundOrder = async (user, data) => {
     const { InboundOrder, InboundOrderLine, MerchantSku, Warehouse, SkuWarehouseStock } = require('../../models');
 
     const { warehouseId, supplierName, supplierReference, notes, lines } = data;
+    await assertWarehousePermission(user, warehouseId, { canEdit: true });
 
     // Validate warehouse belongs to company
     const warehouse = await Warehouse.findOne({
@@ -686,7 +693,12 @@ const getManualInboundOrders = async (user, filters = {}) => {
 
     const where = { company_id: user.companyId, deleted_at: null, is_manual: true };
 
-    if (warehouseId && warehouseId !== 'all') where.warehouse_id = warehouseId;
+    if (warehouseId && warehouseId !== 'all') {
+        await assertWarehousePermission(user, warehouseId);
+        where.warehouse_id = warehouseId;
+    } else {
+        Object.assign(where, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
     if (search) {
         where[Op.or] = [
             { inbound_id: { [Op.like]: `%${search}%` } },
@@ -743,7 +755,7 @@ const getInboundDropdowns = async (user) => {
 
     const [warehouses, currencies] = await Promise.all([
         Warehouse.findAll({
-            where: { company_id: user.companyId, status: 'active' },
+            where: await applyWarehouseScope(user, { company_id: user.companyId, status: 'active' }),
             attributes: ['id', 'name', 'code', 'is_default'],
             order: [['is_default', 'DESC'], ['name', 'ASC']],
         }),
@@ -762,7 +774,7 @@ const getInboundDropdowns = async (user) => {
     return { warehouses, currencies };
 };
 
-// ─── Get SKUs for inbound picker (filtered by warehouse) ─────────────────────
+// ─── Get SKUs for inbound picker (company catalog + selected warehouse stock) ─
 const getSkusForInboundPicker = async (user, { warehouseId, search, page = 1, limit = 20 }) => {
     const { MerchantSku, SkuWarehouseStock } = require('../../models');
 
@@ -771,7 +783,14 @@ const getSkusForInboundPicker = async (user, { warehouseId, search, page = 1, li
         status: 'active',
         deleted_at: null,
     };
-    if (warehouseId) where.warehouse_id = warehouseId;
+    const stockWhere = {};
+    if (warehouseId) {
+        await assertWarehousePermission(user, warehouseId);
+        stockWhere.company_id = user.companyId;
+        stockWhere.warehouse_id = Number(warehouseId);
+    } else {
+        Object.assign(where, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
     if (search) {
         where[Op.or] = [
             { sku_name: { [Op.like]: `%${search}%` } },
@@ -785,20 +804,29 @@ const getSkusForInboundPicker = async (user, { warehouseId, search, page = 1, li
         attributes: ['id', 'sku_name', 'sku_title', 'image_url', 'price', 'warehouse_id'],
         include: [{
             model: SkuWarehouseStock, as: 'stock',
-            attributes: ['qty_on_hand', 'qty_inbound', 'qty_reserved'],
+            attributes: ['warehouse_id', 'qty_on_hand', 'qty_inbound', 'qty_reserved'],
             required: false,
-            where: warehouseId ? { warehouse_id: warehouseId } : undefined,
+            where: warehouseId ? stockWhere : undefined,
         }],
         order: [['sku_name', 'ASC']],
         limit: parseInt(limit),
         offset,
+        distinct: true,
     });
 
     return {
         data: rows.map(s => {
-            const stock = s.stock || { qty_on_hand: 0, qty_inbound: 0, qty_reserved: 0 };
+            const stockRows = Array.isArray(s.stock) ? s.stock : (s.stock ? [s.stock] : []);
+            const selectedStock = warehouseId
+                ? stockRows.find((stock) => String(stock.warehouse_id) === String(warehouseId))
+                : stockRows[0];
+            const stock = selectedStock || { warehouse_id: warehouseId ? Number(warehouseId) : null, qty_on_hand: 0, qty_inbound: 0, qty_reserved: 0 };
+            const plain = s.toJSON();
             return {
-                ...s.toJSON(),
+                ...plain,
+                stock,
+                stock_warehouse_id: stock.warehouse_id || (warehouseId ? Number(warehouseId) : null),
+                original_warehouse_id: plain.warehouse_id,
                 qty_on_hand: stock.qty_on_hand || 0,
                 total_available: stock.qty_on_hand || 0,
                 qty_inbound: stock.qty_inbound || 0,

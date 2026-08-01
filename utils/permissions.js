@@ -116,6 +116,50 @@ const assertStorePermission = async (user, storeId, options = {}) => {
   }
 };
 
+const getPermittedWarehouseIds = async (user, { canEdit = false } = {}) => {
+  if (isOwner(user)) return null;
+  const { UserWarehousePermission } = require('../models');
+  const where = {
+    company_id: user.companyId,
+    user_id: user.userId,
+    can_view: true,
+  };
+  if (canEdit) where.can_edit = true;
+  const rows = await UserWarehousePermission.findAll({ where, attributes: ['warehouse_id'], raw: true });
+  return rows.map((row) => Number(row.warehouse_id)).filter(Boolean);
+};
+
+const hasWarehousePermission = async (user, warehouseId, { canEdit = false } = {}) => {
+  if (isOwner(user)) return true;
+  const { UserWarehousePermission } = require('../models');
+  const where = {
+    company_id: user.companyId,
+    user_id: user.userId,
+    warehouse_id: Number(warehouseId),
+    can_view: true,
+  };
+  if (canEdit) where.can_edit = true;
+  const count = await UserWarehousePermission.count({ where });
+  return count > 0;
+};
+
+const assertWarehousePermission = async (user, warehouseId, options = {}) => {
+  const allowed = await hasWarehousePermission(user, warehouseId, options);
+  if (!allowed) {
+    const err = new Error(options.canEdit
+      ? 'You do not have work/edit permission for this warehouse'
+      : 'You do not have access to this warehouse');
+    err.statusCode = 403;
+    throw err;
+  }
+};
+
+const applyWarehouseScope = async (user, where = {}, field = 'id', options = {}) => {
+  const permittedIds = await getPermittedWarehouseIds(user, options);
+  if (permittedIds === null) return where;
+  return { ...where, [field]: { [require('sequelize').Op.in]: permittedIds } };
+};
+
 module.exports = {
   parsePermissions,
   isOwner,
@@ -125,4 +169,8 @@ module.exports = {
   getPermittedStoreIds,
   hasStorePermission,
   assertStorePermission,
+  getPermittedWarehouseIds,
+  hasWarehousePermission,
+  assertWarehousePermission,
+  applyWarehouseScope,
 };

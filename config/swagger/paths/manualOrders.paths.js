@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 module.exports = {
     schemas: {
@@ -54,8 +54,8 @@ module.exports = {
         '/order-management/manual-orders/sku-search': {
             get: {
                 tags: ['Manual Orders'],
-                summary: 'Search merchant SKUs by warehouse stock',
-                description: 'Returns active merchant SKUs that have stock rows for the selected warehouse. Stock quantities are flattened at the top level of each SKU row for the manual order SKU picker.',
+                summary: 'Search merchant and combine SKUs by warehouse stock',
+                description: 'Returns active merchant SKUs and combine SKUs for the selected warehouse. Stock quantities are flattened at the top level of each SKU row for the manual order SKU picker.',
                 security: [{ bearerAuth: [] }],
                 parameters: [
                     { in: 'query', name: 'warehouseId', required: true, schema: { type: 'integer', example: 1 }, description: 'Warehouse ID used to filter sku_warehouse_stock rows.' },
@@ -66,7 +66,7 @@ module.exports = {
                 ],
                 responses: {
                     200: {
-                        description: 'Merchant SKU search results with flattened warehouse stock quantities',
+                        description: 'SKU search results with flattened warehouse stock quantities',
                         content: {
                             'application/json': {
                                 schema: {
@@ -82,7 +82,10 @@ module.exports = {
                                                         type: 'object',
                                                         properties: {
                                                             id: { type: 'integer', example: 101 },
-                                                            merchant_sku_id: { type: 'integer', example: 101 },
+                                                            merchant_sku_id: { type: 'integer', nullable: true, example: 101 },
+                                                            combine_sku_id: { type: 'integer', nullable: true, example: null },
+                                                            row_id: { type: 'string', example: 'merchant:101' },
+                                                            sku_type: { type: 'string', enum: ['merchant', 'combine'], example: 'merchant' },
                                                             sku_name: { type: 'string', example: 'SKU-001' },
                                                             sku_title: { type: 'string', example: 'Sample Product' },
                                                             product_name: { type: 'string', example: 'Sample Product' },
@@ -937,3 +940,4 @@ module.exports = {
         },
     },
 };
+

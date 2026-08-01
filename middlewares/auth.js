@@ -41,11 +41,19 @@ const authenticate = async (req, res, next) => {
 
         // Load current user + current role permissions on every request so role
         // permission changes apply immediately after the owner edits a role.
-        const { User, Role } = require('../models');
+        const { User, Role, UserWarehousePermission } = require('../models');
         const dbUser = await User.findOne({
             where: { id: decoded.userId, company_id: decoded.companyId, is_active: true },
             attributes: ['id', 'company_id', 'role_id', 'name', 'email', 'role', 'avatar_url'],
-            include: [{ model: Role, as: 'roleInfo', attributes: ['id', 'name', 'permissions'] }],
+            include: [
+                { model: Role, as: 'roleInfo', attributes: ['id', 'name', 'permissions'] },
+                {
+                    model: UserWarehousePermission,
+                    as: 'warehousePermissions',
+                    required: false,
+                    attributes: ['warehouse_id', 'can_view', 'can_edit'],
+                },
+            ],
         });
 
         if (!dbUser) {
@@ -67,6 +75,11 @@ const authenticate = async (req, res, next) => {
             is_owner: roleName === 'owner',
             isOwner: roleName === 'owner',
             permissions: rolePermissions,
+            warehousePermissions: dbUser.warehousePermissions || [],
+            warehousePermissionIds: (dbUser.warehousePermissions || [])
+                .filter((permission) => permission.can_view !== false)
+                .map((permission) => Number(permission.warehouse_id))
+                .filter(Boolean),
         };
 
         next();

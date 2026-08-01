@@ -31,7 +31,7 @@ const blacklistKey = (token) => `blacklist:${token}`;
 // ─── Register Admin (Company Owner) ──────────────────────────────────────────
 
 const registerAdmin = async (data) => {
-    const { User, Company, Role } = require('../../models');
+    const { User, Company, Role, UserStorePermission, UserWarehousePermission, Warehouse } = require('../../models');
 
     const { userName, userEmail, userPassword, companyName, phone, timezone, currency, avatar } = data;
 
@@ -46,28 +46,37 @@ const registerAdmin = async (data) => {
     // Use transaction — company + user + default role must all succeed or all fail
     const result = await sequelize.transaction(async (t) => {
 
-        // 1. Create the company (slug from email prefix + uuid snippet)
-        const slugBase = (companyName || userName)
-            .toLowerCase()
-            .replace(/[^a-z0-9]/g, '-')
-            .replace(/-+/g, '-')
-            .substring(0, 40);
-        const slug = `${slugBase}-${randomUUID().substring(0, 8)}`;
+        // 1. Reuse a company migrated from the old API, otherwise create it.
+        let company = await Company.findOne({
+            where: { email: userEmail },
+            transaction: t,
+        });
 
-        const company = await Company.create({
-            name: companyName || userName,
-            slug,
-            email: userEmail,
-            phone: phone || null,
-            timezone: timezone || 'UTC',
-            currency: (currency && currency.length === 3) ? currency : 'USD',
-            plan: 'trial',
-            status: 'trial',
-            trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days
-        }, { transaction: t });
+        if (!company) {
+            const slugBase = (companyName || userName)
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, '-')
+                .replace(/-+/g, '-')
+                .substring(0, 40);
+            const slug = `${slugBase}-${randomUUID().substring(0, 8)}`;
+
+            company = await Company.create({
+                name: companyName || userName,
+                slug,
+                email: userEmail,
+                phone: phone || null,
+                timezone: timezone || 'UTC',
+                currency: (currency && currency.length === 3) ? currency : 'USD',
+                plan: 'trial',
+                status: 'trial',
+                trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days
+            }, { transaction: t });
+        }
 
         // 2. Create default Owner role for this company
-        const ownerRole = await Role.create({
+        const [ownerRole] = await Role.findOrCreate({
+            where: { company_id: company.id, name: 'Owner' },
+            defaults: {
             company_id: company.id,
             name: 'Owner',
             description: 'Full access — company owner',
@@ -131,13 +140,24 @@ const registerAdmin = async (data) => {
                 }
             }),
 
-        }, { transaction: t });
+            },
+            transaction: t,
+        });
 
         // 3. Create the admin user
         const hashedPassword = await hashPassword(userPassword);
 
         const avatarUrl = await saveAvatarFile(avatar);
             // Store base64 as data URI — in production swap with S3 upload
+
+        let accountId = `ADM-${company.id.toString().padStart(6, '0')}`;
+        const accountIdTaken = await User.findOne({
+            where: { company_id: company.id, account_id: accountId },
+            transaction: t,
+        });
+        if (accountIdTaken) {
+            accountId = `ADM-${company.id.toString().padStart(6, '0')}-${randomUUID().substring(0, 8)}`;
+        }
 
         const user = await User.create({
             company_id: company.id,
@@ -147,8 +167,9 @@ const registerAdmin = async (data) => {
             role: 'owner',
             role_id: ownerRole.id,
             avatar_url: avatarUrl,
-            account_id: `ADM-${company.id.toString().padStart(6, '0')}`,
+            account_id: accountId,
             is_active: true,
+            last_login_at: new Date(),
         }, { transaction: t });
 
         return { company, user };
@@ -193,7 +214,7 @@ const registerAdmin = async (data) => {
 // ─── Login (Admin + Sub Account — same endpoint) ─────────────────────────────
 
 const login = async ({ email, password }) => {
-    const { User, Company, Role } = require('../../models');
+    const { User, Company, Role, UserStorePermission, UserWarehousePermission, Warehouse } = require('../../models');
     const { parsePermissions } = require('../../utils/permissions');
 
     const user = await User.findOne({
@@ -209,6 +230,19 @@ const login = async ({ email, password }) => {
                 as: 'roleInfo',
                 attributes: ['id', 'name', 'permissions'],
                 required: false,
+            },
+            {
+                model: UserStorePermission,
+                as: 'storePermissions',
+                required: false,
+                attributes: ['id', 'company_id', 'user_id', 'connection_id', 'can_view', 'can_edit', 'createdAt'],
+            },
+            {
+                model: UserWarehousePermission,
+                as: 'warehousePermissions',
+                required: false,
+                attributes: ['id', 'company_id', 'user_id', 'warehouse_id', 'can_view', 'can_edit', 'createdAt'],
+                include: Warehouse ? [{ model: Warehouse, as: 'warehouse', attributes: ['id', 'name', 'code'], required: false }] : [],
             },
         ],
     });
@@ -280,6 +314,8 @@ const login = async ({ email, password }) => {
             companySlug: user.company.slug,
             plan: user.company.plan,
             trialEndsAt: user.company.trial_ends_at,
+            storePermissions: (user.storePermissions || []).map((permission) => permission.toJSON ? permission.toJSON() : permission),
+            warehousePermissions: (user.warehousePermissions || []).map((permission) => permission.toJSON ? permission.toJSON() : permission),
         },
     };
 };

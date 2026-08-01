@@ -16,7 +16,7 @@
  */
 
 const { Op, UniqueConstraintError } = require('sequelize');
-const { getPermittedStoreIds, assertStorePermission } = require('../../utils/permissions'); 
+const { getPermittedStoreIds, assertStorePermission, applyWarehouseScope } = require('../../utils/permissions'); 
 
 
 const buildPlatformMappingFields = (platformProduct, platformStore, fulfillmentWarehouseId, userId) => ({
@@ -59,7 +59,7 @@ const getDropdowns = async (user) => {
             order:      [['platform', 'ASC'], ['store_name', 'ASC']],
         }),
         Warehouse.findAll({
-            where:      { company_id: user.companyId, status: 'active' },
+            where:      await applyWarehouseScope(user, { company_id: user.companyId, status: 'active' }),
             attributes: ['id', 'name', 'code', 'is_default'],
             order:      [['is_default', 'DESC'], ['name', 'ASC']],
         }),

@@ -151,10 +151,21 @@ router.post('/manual-orders', [
 ], ctrl.createManualOrder);
 router.post('/platform-orders/change-sku-mapping', [
     body('platform').notEmpty().isIn(['shopee', 'tiktok']),
-    body('merchantSkuId').notEmpty().isInt({ min: 1 }),
+    body('merchantSkuId').optional({ nullable: true }).isInt({ min: 1 }),
+    body('combineSkuId').optional({ nullable: true }).isInt({ min: 1 }),
     body('warehouseId').notEmpty().isInt({ min: 1 }),
     body('order').notEmpty().withMessage('order is required'),
     body('item').notEmpty().withMessage('item is required'),
+    body().custom((value) => {
+        const merchantSkuId = Number(value.merchantSkuId || value.item?.merchantSkuId || 0);
+        const combineSkuId = Number(value.combineSkuId || value.item?.combineSkuId || 0);
+        const hasMerchantSku = Number.isInteger(merchantSkuId) && merchantSkuId > 0;
+        const hasCombineSku = Number.isInteger(combineSkuId) && combineSkuId > 0;
+        if (hasMerchantSku === hasCombineSku) {
+            throw new Error('Exactly one of merchantSkuId or combineSkuId is required');
+        }
+        return true;
+    }),
 ], ctrl.changePlatformOrderSku);
 router.post('/platform-orders/pack-stock', [
     body('platform').notEmpty().isIn(['shopee', 'tiktok']),

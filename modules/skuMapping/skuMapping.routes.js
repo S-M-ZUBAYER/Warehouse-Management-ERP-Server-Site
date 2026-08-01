@@ -56,7 +56,6 @@ router.get('/product-picker', getProductPicker);
 // POST /api/v1/sku-mapping/mapping                — Confirm in Add Mapping modal
 router.post(
     '/mapping',
-    requireRole('owner', 'admin', 'manager'),
     [
         body('merchantSkuId').notEmpty().isInt({ min: 1 }).toInt(),
         body('platformProductIds').isArray({ min: 1 }).withMessage('Select at least one product'),
@@ -69,7 +68,6 @@ router.post(
 // POST /api/v1/sku-mapping/store-mapping         — Map parent SKU to selected stores
 router.post(
     '/store-mapping',
-    requireRole('owner', 'admin', 'manager'),
     [
         body('merchantSkuId').notEmpty().isInt({ min: 1 }).toInt(),
         body('platformStoreIds').isArray({ min: 1 }).withMessage('Select at least one store'),
@@ -83,12 +81,11 @@ router.post(
 );
 
 // DELETE /api/v1/sku-mapping/mapping/:id          — Unlink (unmap) action
-router.delete('/mapping/:id', requireRole('owner', 'admin', 'manager'), unlinkMapping);
+router.delete('/mapping/:id', unlinkMapping);
 
 // POST /api/v1/sku-mapping/sync-mapped            — Sync Mapped button
 router.post(
     '/sync-mapped',
-    requireRole('owner', 'admin', 'manager'),
     [body('merchantSkuId').notEmpty().isInt({ min: 1 }).toInt()],
     syncMapped
 );

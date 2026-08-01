@@ -23,15 +23,15 @@ router.get('/', listMerchantSkuValidator, ctrl.getMerchantSkus);
 router.get('/:id', ctrl.getMerchantSkuById);
 
 // POST /api/v1/merchant-skus             — create product/SKU
-router.post('/', requireRole('owner', 'admin', 'manager'), createMerchantSkuValidator, ctrl.createMerchantSku);
+router.post('/', createMerchantSkuValidator, ctrl.createMerchantSku);
 
 // PUT  /api/v1/merchant-skus/:id         — update product/SKU
-router.put('/:id', requireRole('owner', 'admin', 'manager'), updateMerchantSkuValidator, ctrl.updateMerchantSku);
+router.put('/:id', updateMerchantSkuValidator, ctrl.updateMerchantSku);
 
 // DELETE /api/v1/merchant-skus/bulk      — bulk delete (must be before /:id)
-router.delete('/bulk', requireRole('owner', 'admin', 'manager'), ctrl.bulkDeleteMerchantSkus);
+router.delete('/bulk', ctrl.bulkDeleteMerchantSkus);
 
 // DELETE /api/v1/merchant-skus/:id       — delete single
-router.delete('/:id', requireRole('owner', 'admin', 'manager'), ctrl.deleteMerchantSku);
+router.delete('/:id', ctrl.deleteMerchantSku);
 
 module.exports = router;

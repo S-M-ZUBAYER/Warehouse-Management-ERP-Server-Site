@@ -1,4 +1,4 @@
-module.exports = {
+﻿module.exports = {
     schemas: {
         OutboundOrderResponse: {
             type: 'object',
@@ -37,7 +37,8 @@ module.exports = {
                         type: 'object',
                         properties: {
                             id: { type: 'integer', example: 1 },
-                            merchant_sku_id: { type: 'integer', example: 1 },
+                            merchant_sku_id: { type: 'integer', nullable: true, example: 1 },
+                            combine_sku_id: { type: 'integer', nullable: true, example: null },
                             qty_expected: { type: 'integer', example: 10 },
                             qty_received: { type: 'integer', example: 0 },
                             has_discrepancy: { type: 'boolean', example: false },
@@ -73,7 +74,7 @@ module.exports = {
             get: {
                 tags: ['Outbound'],
                 summary: 'SKU picker for outbound lines',
-                description: 'Returns active merchant SKUs for the selected warehouse with current available stock. Outbound quantities must not exceed qty_available.',
+                description: 'Returns active merchant SKUs and combine SKUs for the selected warehouse with current available stock. Outbound quantities must not exceed qty_available.',
                 security: [{ bearerAuth: [] }],
                 parameters: [
                     { in: 'query', name: 'warehouseId', schema: { type: 'integer' }, description: 'Required by the frontend before selecting SKUs' },
@@ -124,9 +125,11 @@ module.exports = {
                                     lines: {
                                         type: 'array', minItems: 1,
                                         items: {
-                                            type: 'object', required: ['merchantSkuId', 'qtyExpected'],
+                                            type: 'object', required: ['qtyExpected'],
+                                            description: 'Provide exactly one of merchantSkuId or combineSkuId.',
                                             properties: {
-                                                merchantSkuId: { type: 'integer', example: 1 },
+                                                merchantSkuId: { type: 'integer', nullable: true, example: 1 },
+                                                combineSkuId: { type: 'integer', nullable: true, example: null },
                                                 qtyExpected: { type: 'integer', example: 10, description: 'Must not exceed available inventory in the selected warehouse' },
                                                 unitCost: { type: 'number', example: 12.50 },
                                                 currency: { type: 'string', example: 'USD' },
@@ -153,7 +156,7 @@ module.exports = {
                 description: 'Only draft outbound orders can be edited. The outbound ID and selected warehouse cannot be changed.',
                 security: [{ bearerAuth: [] }],
                 parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'integer' } }],
-                requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['receivingWarehouseName', 'receivingWarehouseAddress'], properties: { supplierName: { type: 'string' }, supplierReference: { type: 'string' }, receivingWarehouseName: { type: 'string' }, receivingWarehouseAddress: { type: 'string' }, notes: { type: 'string' }, lines: { type: 'array', items: { type: 'object', required: ['merchantSkuId', 'qtyExpected'], properties: { merchantSkuId: { type: 'integer' }, qtyExpected: { type: 'integer' }, unitCost: { type: 'number' }, currency: { type: 'string' } } } } } } } } },
+                requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['receivingWarehouseName', 'receivingWarehouseAddress'], properties: { supplierName: { type: 'string' }, supplierReference: { type: 'string' }, receivingWarehouseName: { type: 'string' }, receivingWarehouseAddress: { type: 'string' }, notes: { type: 'string' }, lines: { type: 'array', items: { type: 'object', required: ['qtyExpected'], description: 'Provide exactly one of merchantSkuId or combineSkuId.', properties: { merchantSkuId: { type: 'integer', nullable: true }, combineSkuId: { type: 'integer', nullable: true }, qtyExpected: { type: 'integer' }, unitCost: { type: 'number' }, currency: { type: 'string' } } } } } } } } },
                 responses: { 200: { description: 'Outbound draft updated' }, 400: { description: 'Cannot edit non-draft outbound or quantity exceeds available stock' } },
             },
             delete: {
@@ -188,3 +191,4 @@ module.exports = {
         },
     },
 };
+

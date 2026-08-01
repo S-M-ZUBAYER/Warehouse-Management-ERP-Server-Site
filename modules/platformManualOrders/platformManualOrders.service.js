@@ -1,10 +1,12 @@
-'use strict';
+﻿'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const platformOrderDeductionsService = require('../platformOrderDeductions/platformOrderDeductions.service');
+const sellableSkuStock = require('../shared/sellableSkuStock');
+const { applyWarehouseScope, assertWarehousePermission } = require('../../utils/permissions');
 
 const STATUSES = new Set(['Processed', 'On The Way', 'Shipped', 'Delivered', 'Completed', 'Cancelled']);
 
@@ -40,6 +42,8 @@ const parseJsonField = (body, field, required = true) => {
         throw err;
     }
 };
+
+const hasBodyField = (body, field) => body[field] !== undefined && body[field] !== null && body[field] !== '';
 
 const normalizeArrayQuery = (value) => {
     if (Array.isArray(value)) return value.flatMap((item) => normalizeArrayQuery(item));
@@ -117,6 +121,7 @@ const validateOrderBasics = async ({ user, body, companyId, requireWaybill, file
         err.statusCode = 400;
         throw err;
     }
+    await assertWarehousePermission(user, warehouseId, { canEdit: true });
 
     const warehouse = await Warehouse.findOne({ where: { id: warehouseId, company_id: companyId, status: 'active' } });
     if (!warehouse) {
@@ -129,15 +134,10 @@ const validateOrderBasics = async ({ user, body, companyId, requireWaybill, file
 };
 
 const normalizeProduct = (product) => {
-    const merchantSkuId = Number(product.merchantSkuId || product.merchant_sku_id || product.id || product.skuId);
+    const ref = sellableSkuStock.getLineSkuRef(product);
     const quantity = toPositiveInt(product.qty || product.quantity, 'product qty');
-    if (!Number.isInteger(merchantSkuId) || merchantSkuId <= 0) {
-        const err = new Error('Each product must include merchantSkuId/id');
-        err.statusCode = 400;
-        throw err;
-    }
     return {
-        merchantSkuId,
+        ...ref,
         quantity,
         unitPrice: toNumber(product.unitPrice || product.unit_price),
         weight: toNumber(product.weight),
@@ -147,77 +147,53 @@ const normalizeProduct = (product) => {
 };
 
 const applyStockDeduction = async ({ user, companyId, order, warehouseId, products, transaction }) => {
-    const { MerchantSku, SkuWarehouseStock, StockLedgerEntry, PlatformManualOrderItem, PlatformSkuMapping } = require('../../models');
+    const { MerchantSku, CombineSku, PlatformManualOrderItem, PlatformSkuMapping } = require('../../models');
     const affectedMerchantSkuIds = [];
     const platformStockDeductionItems = [];
     const createdItems = [];
 
     for (const rawProduct of products) {
         const product = normalizeProduct(rawProduct);
-        const sku = await MerchantSku.findOne({
-            where: { id: product.merchantSkuId, company_id: companyId, deleted_at: null, status: 'active' },
-            transaction,
-        });
+        const sku = product.kind === 'combine'
+            ? await CombineSku.findOne({ where: { id: product.combineSkuId, company_id: companyId, warehouse_id: warehouseId, deleted_at: null, status: 'active' }, transaction })
+            : await MerchantSku.findOne({ where: { id: product.merchantSkuId, company_id: companyId, deleted_at: null, status: 'active' }, transaction });
         if (!sku) {
-            const err = new Error(`Merchant SKU ${product.merchantSkuId} not found`);
+            const err = new Error(`${product.kind === 'combine' ? 'Combine' : 'Merchant'} SKU not found`);
             err.statusCode = 404;
             throw err;
         }
 
-        const stockRecord = await SkuWarehouseStock.findOne({
-            where: { company_id: companyId, merchant_sku_id: product.merchantSkuId, warehouse_id: warehouseId },
-            lock: transaction.LOCK.UPDATE,
+        const deduction = await sellableSkuStock.deductSellableStock({
+            user,
+            companyId,
+            line: rawProduct,
+            warehouseId,
+            quantity: product.quantity,
+            referenceType: 'platform_manual_order',
+            referenceId: order.order_number,
+            notes: 'Platform manual order stock deduction',
+            movementType: 'sale_deduction',
             transaction,
         });
-        if (!stockRecord) {
-            const err = new Error(`No stock record for ${sku.sku_name} in selected warehouse`);
-            err.statusCode = 400;
-            throw err;
-        }
-
-        const qtyOnHand = Number(stockRecord.qty_on_hand || 0);
-        const qtyReserved = Number(stockRecord.qty_reserved || 0);
-        const qtyAvailable = Math.max(0, qtyOnHand - qtyReserved);
-        if (qtyAvailable < product.quantity) {
-            const err = new Error(`Insufficient available stock for ${sku.sku_name}: available ${qtyAvailable}, requested ${product.quantity}`);
-            err.statusCode = 400;
-            throw err;
-        }
-
-        const newQtyOnHand = qtyOnHand - product.quantity;
-        await stockRecord.update({ qty_on_hand: newQtyOnHand }, { transaction });
-
-        await StockLedgerEntry.create({
-            company_id: companyId,
-            merchant_sku_id: product.merchantSkuId,
-            warehouse_id: warehouseId,
-            sku_warehouse_stock_id: stockRecord.id,
-            movement_type: 'sale_deduction',
-            quantity_delta: -product.quantity,
-            qty_on_hand_after: newQtyOnHand,
-            reference_type: 'platform_manual_order',
-            reference_id: order.order_number,
-            notes: 'Platform manual order stock deduction',
-            created_by: user.userId || user.id || null,
-        }, { transaction });
+        deduction.childDeductions.forEach((child) => affectedMerchantSkuIds.push(child.merchantSkuId));
+        platformStockDeductionItems.push(deduction.platformDeduction);
 
         const item = await PlatformManualOrderItem.create({
             company_id: companyId,
             platform_manual_order_id: order.id,
-            merchant_sku_id: product.merchantSkuId,
+            merchant_sku_id: product.kind === 'merchant' ? product.merchantSkuId : null,
+            combine_sku_id: product.kind === 'combine' ? product.combineSkuId : null,
             warehouse_id: warehouseId,
-            sku: sku.sku_name,
-            product_name: product.name || sku.sku_title,
+            sku: product.kind === 'combine' ? sku.combine_sku_code : sku.sku_name,
+            product_name: product.name || (product.kind === 'combine' ? sku.combine_name : sku.sku_title),
             quantity: product.quantity,
             unit_price: product.unitPrice,
             weight: product.weight || toNumber(sku.weight),
-            qty_on_hand_before: qtyOnHand,
-            qty_on_hand_after: newQtyOnHand,
+            qty_on_hand_before: deduction.childDeductions[0]?.qtyOnHandBefore ?? null,
+            qty_on_hand_after: deduction.childDeductions[0]?.qtyOnHandAfter ?? null,
         }, { transaction });
 
         createdItems.push(item);
-        affectedMerchantSkuIds.push(product.merchantSkuId);
-        platformStockDeductionItems.push({ merchantSkuId: product.merchantSkuId, warehouseId, quantity: product.quantity });
     }
 
     if (affectedMerchantSkuIds.length) {
@@ -238,7 +214,7 @@ const applyStockDeduction = async ({ user, companyId, order, warehouseId, produc
 };
 
 const restoreExistingStock = async ({ user, companyId, order, transaction }) => {
-    const { SkuWarehouseStock, StockLedgerEntry, PlatformManualOrderItem, PlatformSkuMapping } = require('../../models');
+    const { PlatformManualOrderItem, PlatformSkuMapping } = require('../../models');
     const items = await PlatformManualOrderItem.findAll({
         where: { company_id: companyId, platform_manual_order_id: order.id },
         lock: transaction.LOCK.UPDATE,
@@ -248,34 +224,26 @@ const restoreExistingStock = async ({ user, companyId, order, transaction }) => 
     const platformStockRestoreItems = [];
 
     for (const item of items) {
-        const stockRecord = await SkuWarehouseStock.findOne({
-            where: { company_id: companyId, merchant_sku_id: item.merchant_sku_id, warehouse_id: item.warehouse_id },
-            lock: transaction.LOCK.UPDATE,
+        const restored = await sellableSkuStock.restoreSellableStock({
+            user,
+            companyId,
+            item,
+            referenceType: 'platform_manual_order',
+            referenceId: order.order_number,
+            notes: 'Platform manual order stock restored',
             transaction,
         });
-        if (!stockRecord) continue;
-
-        const newQtyOnHand = Number(stockRecord.qty_on_hand || 0) + Number(item.quantity || 0);
-        await stockRecord.update({ qty_on_hand: newQtyOnHand }, { transaction });
-        await StockLedgerEntry.create({
-            company_id: companyId,
-            merchant_sku_id: item.merchant_sku_id,
-            warehouse_id: item.warehouse_id,
-            sku_warehouse_stock_id: stockRecord.id,
-            movement_type: 'return',
-            quantity_delta: Number(item.quantity || 0),
-            qty_on_hand_after: newQtyOnHand,
-            reference_type: 'platform_manual_order',
-            reference_id: order.order_number,
-            notes: 'Platform manual order stock restored',
-            created_by: user.userId || user.id || null,
-        }, { transaction });
-        affectedMerchantSkuIds.push(item.merchant_sku_id);
-        platformStockRestoreItems.push({
-            merchantSkuId: item.merchant_sku_id,
-            warehouseId: item.warehouse_id,
-            quantityDelta: Number(item.quantity || 0),
+        restored.restored.forEach((child) => {
+            affectedMerchantSkuIds.push(child.merchantSkuId);
+            platformStockRestoreItems.push({
+                merchantSkuId: child.merchantSkuId,
+                warehouseId: child.warehouseId,
+                quantityDelta: child.quantityDelta,
+            });
         });
+        if (restored.ref.kind === 'combine') {
+            platformStockRestoreItems.push({ combineSkuId: restored.ref.combineSkuId, warehouseId: item.warehouse_id, quantityDelta: Number(item.quantity || 0) });
+        }
     }
 
     if (affectedMerchantSkuIds.length) {
@@ -288,7 +256,6 @@ const restoreExistingStock = async ({ user, companyId, order, transaction }) => 
     await PlatformManualOrderItem.destroy({ where: { company_id: companyId, platform_manual_order_id: order.id }, transaction });
     return { affectedMerchantSkuIds, platformStockRestoreItems };
 };
-
 const syncPlatformStocks = async (companyId, items) => {
     if (!items.length) return null;
     const [shopee, tiktok] = await Promise.all([
@@ -332,7 +299,10 @@ const toApiOrder = (order) => ({
     sender: order.sender || {},
     buyer: order.buyer || {},
     products: (order.items || []).map((item) => ({
-        id: String(item.merchant_sku_id),
+        id: String(item.combine_sku_id ? `combine:${item.combine_sku_id}` : item.merchant_sku_id),
+        merchantSkuId: item.merchant_sku_id || null,
+        combineSkuId: item.combine_sku_id || null,
+        skuType: item.combine_sku_id ? 'combine' : 'merchant',
         sku: item.sku,
         name: item.product_name || '',
         qty: Number(item.quantity || 0),
@@ -366,7 +336,12 @@ const listPlatformManualOrders = async (user, query = {}) => {
     const limit = Math.max(1, Math.min(200, Number.parseInt(query.limit || 20, 10)));
     const where = { company_id: companyId };
 
-    if (query.warehouseId) where.warehouse_id = Number(query.warehouseId);
+    if (query.warehouseId) {
+        await assertWarehousePermission(user, query.warehouseId);
+        where.warehouse_id = Number(query.warehouseId);
+    } else {
+        Object.assign(where, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
 
     const statuses = normalizeArrayQuery(query.statuses).map(validateStatus);
     if (statuses.length) where.shipment_status = { [Op.in]: statuses };
@@ -456,56 +431,38 @@ const updatePlatformManualOrder = async (user, id, body = {}, file = null) => {
     const { PlatformManualOrder } = require('../../models');
     const companyId = resolveCompanyId(user);
     const existing = await getOrderForUser(user, id);
-    const products = parseJsonField(body, 'products');
-    if (!Array.isArray(products) || products.length < 1) {
-        const err = new Error('products must be a non-empty array');
-        err.statusCode = 400;
-        throw err;
-    }
-    const payload = await validateOrderBasics({ user, body, companyId, requireWaybill: false, file, existingOrder: existing });
+    const payload = await validateOrderBasics({
+        user,
+        body: {
+            ...body,
+            warehouseId: existing.warehouse_id,
+            warehouse_id: existing.warehouse_id,
+        },
+        companyId,
+        requireWaybill: false,
+        file,
+        existingOrder: existing,
+    });
     const oldWaybillUrl = existing.waybill_url;
-    let platformStockItems = [];
-    let platformStockRestoreItems = [];
 
     await sequelize.transaction(async (transaction) => {
-        const restore = await restoreExistingStock({ user, companyId, order: existing, transaction });
-        platformStockRestoreItems = restore.platformStockRestoreItems;
         await PlatformManualOrder.update({
-            warehouse_id: payload.warehouseId,
+            warehouse_id: existing.warehouse_id,
             order_number: payload.orderNumber,
             order_time: payload.orderTime,
             order_date: payload.orderDate,
             ...(file ? { waybill_file_name: file.originalname || file.filename, waybill_url: publicWaybillUrl(file) } : {}),
-            logistic: parseJsonField(body, 'logistic'),
-            sender: parseJsonField(body, 'sender'),
-            buyer: parseJsonField(body, 'buyer'),
-            package_details: parseJsonField(body, 'package', false),
+            ...(hasBodyField(body, 'logistic') ? { logistic: parseJsonField(body, 'logistic') } : {}),
+            sender: existing.sender,
+            ...(hasBodyField(body, 'buyer') ? { buyer: parseJsonField(body, 'buyer') } : {}),
+            ...(hasBodyField(body, 'package') ? { package_details: parseJsonField(body, 'package', false) } : {}),
         }, { where: { id: existing.id, company_id: companyId }, transaction });
-
-        const refreshed = await PlatformManualOrder.findByPk(existing.id, { transaction });
-        const deduction = await applyStockDeduction({ user, companyId, order: refreshed, warehouseId: payload.warehouseId, products, transaction });
-        platformStockItems = deduction.platformStockDeductionItems;
     });
 
     if (file) deleteUploadedFile(oldWaybillUrl);
 
-    let platformStockSync = null;
-    let platformStockSyncError = null;
-    try {
-        platformStockSync = await syncPlatformStockAdjustments(companyId, [
-            ...platformStockRestoreItems,
-            ...platformStockItems.map((item) => ({
-                merchantSkuId: item.merchantSkuId,
-                warehouseId: item.warehouseId,
-                quantityDelta: -Number(item.quantity || 0),
-            })),
-        ]);
-    } catch (err) {
-        platformStockSyncError = err.message || 'Platform stock sync failed';
-    }
-
     const order = await getOrderForUser(user, id);
-    return { order: toApiOrder(order), platformStockSync, platformStockSyncError };
+    return { order: toApiOrder(order), platformStockSync: null, platformStockSyncError: null };
 };
 
 const updatePlatformManualOrderStatus = async (user, id, body = {}) => {
@@ -539,7 +496,7 @@ const listCompanyWarehouses = async (user, query = {}) => {
     const { Warehouse } = require('../../models');
     const companyId = resolveCompanyId(user, query.companyId);
     const rows = await Warehouse.findAll({
-        where: { company_id: companyId, status: 'active' },
+        where: await applyWarehouseScope(user, { company_id: companyId, status: 'active' }),
         attributes: ['id', 'name', 'code'],
         order: [['is_default', 'DESC'], ['name', 'ASC']],
     });
@@ -552,13 +509,11 @@ const listCompanyWarehouses = async (user, query = {}) => {
 };
 
 const listWarehouseMerchantSkus = async (user, warehouseId, query = {}) => {
-    const { MerchantSku, SkuWarehouseStock } = require('../../models');
+    const { MerchantSku, CombineSku, CombineSkuItem, SkuWarehouseStock } = require('../../models');
     const companyId = resolveCompanyId(user, query.companyId);
     const search = normalizeString(query.search);
     const warehouseNumericId = Number(warehouseId);
-    const warehouseWhere = Number.isInteger(warehouseNumericId)
-        ? { id: warehouseNumericId }
-        : { code: warehouseId };
+    const warehouseWhere = Number.isInteger(warehouseNumericId) ? { id: warehouseNumericId } : { code: warehouseId };
     const { Warehouse } = require('../../models');
     const warehouse = await Warehouse.findOne({ where: { ...warehouseWhere, company_id: companyId, status: 'active' } });
     if (!warehouse) {
@@ -566,35 +521,61 @@ const listWarehouseMerchantSkus = async (user, warehouseId, query = {}) => {
         err.statusCode = 404;
         throw err;
     }
+    await assertWarehousePermission(user, warehouse.id);
 
     const skuWhere = { company_id: companyId, deleted_at: null, status: 'active' };
+    const combineWhere = { company_id: companyId, deleted_at: null, status: 'active', warehouse_id: warehouse.id };
     if (search) {
         skuWhere[Op.or] = [
             { sku_name: { [Op.like]: `%${search}%` } },
             { sku_title: { [Op.like]: `%${search}%` } },
         ];
+        combineWhere[Op.or] = [
+            { combine_sku_code: { [Op.like]: `%${search}%` } },
+            { combine_name: { [Op.like]: `%${search}%` } },
+        ];
     }
 
-    const rows = await MerchantSku.findAll({
-        where: skuWhere,
-        include: [{
-            model: SkuWarehouseStock,
-            as: 'stock',
-            where: { company_id: companyId, warehouse_id: warehouse.id },
-            required: true,
-            attributes: ['qty_on_hand', 'qty_reserved'],
-        }],
-        order: [['sku_name', 'ASC']],
-        limit: 100,
-    });
+    const [merchantRows, combineRows] = await Promise.all([
+        MerchantSku.findAll({
+            where: skuWhere,
+            include: [{
+                model: SkuWarehouseStock,
+                as: 'stock',
+                where: { company_id: companyId, warehouse_id: warehouse.id },
+                required: true,
+                attributes: ['qty_on_hand', 'qty_reserved'],
+            }],
+            order: [['sku_name', 'ASC']],
+            limit: 100,
+        }),
+        CombineSku.findAll({
+            where: combineWhere,
+            attributes: ['id', 'combine_sku_code', 'combine_name', 'image_url', 'selling_price', 'weight'],
+            include: [{
+                model: CombineSkuItem,
+                as: 'items',
+                attributes: ['id', 'merchant_sku_id'],
+                required: false,
+                include: [{
+                    model: MerchantSku,
+                    as: 'merchantSku',
+                    attributes: ['id', 'image_url'],
+                    required: false,
+                }],
+            }],
+            order: [['combine_sku_code', 'ASC']],
+            limit: 100,
+        }),
+    ]);
 
-    return rows.map((sku) => {
+    const merchants = merchantRows.map((sku) => {
         const stockRows = Array.isArray(sku.stock) ? sku.stock : [];
-        const available = stockRows.reduce((sum, stock) => (
-            sum + Math.max(0, Number(stock.qty_on_hand || 0) - Number(stock.qty_reserved || 0))
-        ), 0);
+        const available = stockRows.reduce((sum, stock) => sum + Math.max(0, Number(stock.qty_on_hand || 0) - Number(stock.qty_reserved || 0)), 0);
         return {
-            id: String(sku.id),
+            id: `merchant:${sku.id}`,
+            merchantSkuId: String(sku.id),
+            skuType: 'merchant',
             sku: sku.sku_name,
             name: sku.sku_title,
             image: sku.image_url || '',
@@ -603,8 +584,26 @@ const listWarehouseMerchantSkus = async (user, warehouseId, query = {}) => {
             weight: Number(sku.weight || 0),
         };
     });
-};
 
+    const combines = await Promise.all(combineRows.map(async (sku) => {
+        const availability = await sellableSkuStock.getCombineAvailability({ companyId, combineSkuId: sku.id, warehouseId: warehouse.id });
+        const firstItem = Array.isArray(sku.items) ? sku.items.find((item) => item?.merchantSku?.image_url) : null;
+        return {
+            id: `combine:${sku.id}`,
+            combineSkuId: String(sku.id),
+            skuType: 'combine',
+            sku: sku.combine_sku_code,
+            name: sku.combine_name,
+            image: sku.image_url || firstItem?.merchantSku?.image_url || '',
+            warehouseName: warehouse.name,
+            availableForPlatform: Number(availability?.available || 0),
+            unitPrice: Number(sku.selling_price || 0),
+            weight: Number(sku.weight || 0),
+        };
+    }));
+
+    return [...merchants, ...combines];
+};
 module.exports = {
     listPlatformManualOrders,
     createPlatformManualOrder,
@@ -614,3 +613,6 @@ module.exports = {
     listCompanyWarehouses,
     listWarehouseMerchantSkus,
 };
+
+
+

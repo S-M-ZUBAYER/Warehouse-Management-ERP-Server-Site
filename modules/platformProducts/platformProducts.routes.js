@@ -27,14 +27,13 @@ router.get('/:productId/merchant-sku-options', ctrl.getMerchantSkuOptions);
 
 // POST /api/v1/platform-products/sync                   - Sync Product button
 // Query: ?platformStoreId=1 (optional)
-router.post('/sync', requireRole('owner', 'admin', 'manager'), ctrl.syncProducts);
+router.post('/sync', ctrl.syncProducts);
 
 // POST /api/v1/platform-products/generate-sku           - Generate Merchant SKU
 // Body: { platformProductIds: [1,2], warehouseId: 1 }
 // SKU format: exact child/variant seller SKU (no platform prefix, no warehouse suffix)
 router.post(
     '/generate-sku',
-    requireRole('owner', 'admin', 'manager'),
     [
         body('platformProductIds').isArray({ min: 1 }).withMessage('Select at least one product'),
         body('platformProductIds.*').isInt({ min: 1 }).toInt(),
@@ -48,7 +47,6 @@ router.post(
 // If platformProductIds empty → map ALL unmapped SKUs that already have/generated match a Merchant SKU
 router.post(
     '/auto-mapping',
-    requireRole('owner', 'admin', 'manager'),
     [
         body('platformProductIds').optional().isArray(),
         body('platformProductIds.*').optional().isInt({ min: 1 }).toInt(),
@@ -63,7 +61,6 @@ router.post(
 // POST /api/v1/platform-products/push-stock             - Push stock to platform
 router.post(
     '/push-stock',
-    requireRole('owner', 'admin', 'manager'),
     [
         body('mappingId').notEmpty().isInt({ min: 1 }).toInt(),
         body('newQty').notEmpty().isInt({ min: 0 }).toInt(),
@@ -76,7 +73,6 @@ router.post(
 // Body: { platformProductId: number, merchantSkuId: number }
 router.post(
     '/map-merchant-sku',
-    requireRole('owner', 'admin', 'manager'),
     [
         body('platformProductId').notEmpty().isInt({ min: 1 }).toInt(),
         body('merchantSkuId').notEmpty().isInt({ min: 1 }).toInt(),
@@ -85,6 +81,6 @@ router.post(
 );
 
 // DELETE /api/v1/platform-products/mapping/:mappingId   - Unlink (unmap)
-router.delete('/mapping/:mappingId', requireRole('owner', 'admin', 'manager'), ctrl.unlink);
+router.delete('/mapping/:mappingId', ctrl.unlink);
 
 module.exports = router;

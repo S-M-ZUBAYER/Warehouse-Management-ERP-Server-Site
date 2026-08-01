@@ -58,7 +58,6 @@ router.get(
 // Creates the group if needed, then links one or more child SKUs.
 router.post(
     '/primary/:primarySkuId/members',
-    requireRole('owner', 'admin', 'manager'),
     [
         body('secondarySkuIds').isArray({ min: 1 }).withMessage('Select at least one SKU'),
         body('secondarySkuIds.*').isInt({ min: 1 }).toInt(),
@@ -72,7 +71,6 @@ router.get('/:groupId', getGroup);
 // POST /api/v1/sku-sync-groups
 router.post(
     '/',
-    requireRole('owner', 'admin', 'manager'),
     [
         body('primarySkuId').notEmpty().isInt({ min: 1 }).toInt(),
         body('name').optional().isString().trim().isLength({ max: 100 }),
@@ -83,15 +81,14 @@ router.post(
 // POST /api/v1/sku-sync-groups/:groupId/members
 router.post(
     '/:groupId/members',
-    requireRole('owner', 'admin', 'manager'),
     [body('secondarySkuId').notEmpty().isInt({ min: 1 }).toInt()],
     addMember
 );
 
 // DELETE /api/v1/sku-sync-groups/:groupId/members/:memberSkuId
-router.delete('/:groupId/members/:memberSkuId', requireRole('owner', 'admin', 'manager'), removeMember);
+router.delete('/:groupId/members/:memberSkuId', removeMember);
 
 // DELETE /api/v1/sku-sync-groups/:groupId
-router.delete('/:groupId', requireRole('owner', 'admin', 'manager'), dissolveGroup);
+router.delete('/:groupId', dissolveGroup);
 
 module.exports = router;

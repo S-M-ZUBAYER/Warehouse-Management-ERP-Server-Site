@@ -40,6 +40,15 @@ const createUpdateValidators = [
     body('products').notEmpty().withMessage('products is required'),
 ];
 
+const updateValidators = [
+    body('orderNumber').optional().notEmpty().withMessage('orderNumber is required').isLength({ max: 100 }),
+    body('orderTime').optional().notEmpty().withMessage('orderTime is required').isLength({ max: 10 }),
+    body('orderDate').optional().notEmpty().withMessage('orderDate is required').isISO8601(),
+    body('logistic').optional().notEmpty().withMessage('logistic is required'),
+    body('buyer').optional().notEmpty().withMessage('buyer is required'),
+    body('package').optional(),
+];
+
 router.get('/', [
     query('companyId').notEmpty().withMessage('companyId is required'),
     query('warehouseId').optional(),
@@ -56,7 +65,7 @@ router.get('/', [
 ], ctrl.listOrders);
 
 router.post('/', upload.single('waybillFile'), createUpdateValidators, ctrl.createOrder);
-router.put('/:id', upload.single('waybillFile'), createUpdateValidators, ctrl.updateOrder);
+router.put('/:id', upload.single('waybillFile'), updateValidators, ctrl.updateOrder);
 router.patch('/:id/status', [
     body('shipmentStatus').notEmpty().withMessage('shipmentStatus is required').isIn(statusValues),
 ], ctrl.updateStatus);

@@ -83,10 +83,18 @@ const packStockValidator = [
 
 const skuOverrideValidator = [
     body('platform').notEmpty().withMessage('platform is required').isIn(['shopee', 'tiktok']),
-    body('replacementMerchantSkuId').notEmpty().withMessage('replacementMerchantSkuId is required').isInt({ min: 1 }),
+    body('replacementMerchantSkuId').optional({ nullable: true }).isInt({ min: 1 }),
+    body('replacementCombineSkuId').optional({ nullable: true }).isInt({ min: 1 }),
     body('replacementWarehouseId').notEmpty().withMessage('replacementWarehouseId is required').isInt({ min: 1 }),
     body('quantity').optional().isInt({ min: 1 }),
     body().custom((value) => {
+        const replacementMerchantSkuId = Number(value.replacementMerchantSkuId || value.merchantSkuId || 0);
+        const replacementCombineSkuId = Number(value.replacementCombineSkuId || value.combineSkuId || 0);
+        const hasMerchantSku = Number.isInteger(replacementMerchantSkuId) && replacementMerchantSkuId > 0;
+        const hasCombineSku = Number.isInteger(replacementCombineSkuId) && replacementCombineSkuId > 0;
+        if (hasMerchantSku === hasCombineSku) {
+            throw new Error('Exactly one replacement SKU is required');
+        }
         if (!value.platformOrderId && !value.orderId && !value.order?.orderId && !value.order?.orderNo && !value.order?.id) {
             throw new Error('orderId is required');
         }

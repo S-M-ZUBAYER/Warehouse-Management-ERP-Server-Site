@@ -18,6 +18,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const redis = require('../../config/redis');
 const { default: axios } = require('axios');
+const { applyWarehouseScope, assertWarehousePermission, getPermittedWarehouseIds } = require('../../utils/permissions');
 
 const cacheKey = (companyId, suffix = '') =>
     `company:${companyId}:cache:inventory${suffix ? ':' + suffix : ''}`;
@@ -79,7 +80,10 @@ const getInventoryList = async (user, filters = {}) => {
     // ── Build WHERE for SkuWarehouseStock ──────────────────────────────────
     const stockWhere = { company_id: user.companyId };
     if (warehouseId && warehouseId !== 'all') {
+        await assertWarehousePermission(user, warehouseId);
         stockWhere.warehouse_id = parseInt(warehouseId, 10);
+    } else {
+        Object.assign(stockWhere, await applyWarehouseScope(user, {}, 'warehouse_id'));
     }
 
     // ── Merchant SKU include (always required join) ─────────────────────────
@@ -294,9 +298,19 @@ const getInventoryList = async (user, filters = {}) => {
 const getInventoryCounts = async (user, filters = {}) => {
     const { warehouseId } = filters;
 
-    const warehouseClause = warehouseId && warehouseId !== 'all'
-        ? `AND sws.warehouse_id = :warehouseId`
-        : '';
+    let warehouseClause = '';
+    let scopedWarehouseIds = null;
+    if (warehouseId && warehouseId !== 'all') {
+        await assertWarehousePermission(user, warehouseId);
+        warehouseClause = `AND sws.warehouse_id = :warehouseId`;
+    } else {
+        scopedWarehouseIds = await getPermittedWarehouseIds(user);
+        if (scopedWarehouseIds !== null) {
+            warehouseClause = scopedWarehouseIds.length
+                ? `AND sws.warehouse_id IN (:scopedWarehouseIds)`
+                : `AND 1 = 0`;
+        }
+    }
 
     const [results] = await sequelize.query(
         `SELECT
@@ -317,6 +331,7 @@ const getInventoryCounts = async (user, filters = {}) => {
             replacements: {
                 companyId: user.companyId,
                 warehouseId: warehouseId ? parseInt(warehouseId, 10) : null,
+                scopedWarehouseIds,
             },
             type: sequelize.QueryTypes.SELECT,
         }
@@ -719,9 +734,10 @@ const callTikTokUpdateStock = async (mapping, qty) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const getInventoryDropdowns = async (user) => {
     const { Warehouse } = require('../../models');
+    const where = await applyWarehouseScope(user, { company_id: user.companyId, status: 'active' });
 
     const warehouses = await Warehouse.findAll({
-        where: { company_id: user.companyId, status: 'active' },
+        where,
         attributes: ['id', 'name', 'code', 'is_default'],
         order: [['is_default', 'DESC'], ['name', 'ASC']],
     });

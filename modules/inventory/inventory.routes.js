@@ -36,7 +36,6 @@ router.get('/', listInventoryValidator, ctrl.getInventoryList);
 // Roles: owner | admin | manager
 router.put(
     '/stock-alert',
-    requireRole('owner', 'admin', 'manager'),
     setStockAlertValidator,
     ctrl.setStockAlert
 );
@@ -47,7 +46,6 @@ router.put(
 // Roles: owner | admin | manager
 router.put(
     '/sync',
-    requireRole('owner', 'admin', 'manager'),
     syncInventoryValidator,
     ctrl.syncInventory
 );

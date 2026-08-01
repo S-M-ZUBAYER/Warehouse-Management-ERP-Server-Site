@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const axios = require('axios');
 const { Op } = require('sequelize');
@@ -711,55 +711,73 @@ const findPlatformProductForMapping = async (mapping, platform) => {
 };
 
 const aggregateManualOrderDeductions = (items = []) => {
-    const totals = new Map();
+    const merchantTotals = new Map();
+    const combineTotals = new Map();
 
     for (const item of items) {
         const merchantSkuId = Number(item.merchantSkuId || item.merchant_sku_id);
+        const combineSkuId = Number(item.combineSkuId || item.combine_sku_id);
         const quantity = Number(item.quantity || item.qty || 0);
-        if (!Number.isInteger(merchantSkuId) || merchantSkuId <= 0 || !Number.isFinite(quantity) || quantity <= 0) continue;
-        totals.set(merchantSkuId, (totals.get(merchantSkuId) || 0) + quantity);
+        if (!Number.isFinite(quantity) || quantity <= 0) continue;
+        if (Number.isInteger(merchantSkuId) && merchantSkuId > 0) {
+            merchantTotals.set(merchantSkuId, (merchantTotals.get(merchantSkuId) || 0) + quantity);
+        } else if (Number.isInteger(combineSkuId) && combineSkuId > 0) {
+            combineTotals.set(combineSkuId, (combineTotals.get(combineSkuId) || 0) + quantity);
+        }
     }
 
-    return totals;
+    return { merchantTotals, combineTotals };
 };
 
 const aggregateManualOrderAdjustments = (items = []) => {
-    const totals = new Map();
+    const merchantTotals = new Map();
+    const combineTotals = new Map();
 
     for (const item of items) {
         const merchantSkuId = Number(item.merchantSkuId || item.merchant_sku_id);
+        const combineSkuId = Number(item.combineSkuId || item.combine_sku_id);
         const quantityDelta = Number(item.quantityDelta || item.quantity_delta || 0);
-        if (!Number.isInteger(merchantSkuId) || merchantSkuId <= 0 || !Number.isFinite(quantityDelta) || quantityDelta === 0) continue;
-        totals.set(merchantSkuId, (totals.get(merchantSkuId) || 0) + quantityDelta);
+        if (!Number.isFinite(quantityDelta) || quantityDelta === 0) continue;
+        if (Number.isInteger(merchantSkuId) && merchantSkuId > 0) {
+            merchantTotals.set(merchantSkuId, (merchantTotals.get(merchantSkuId) || 0) + quantityDelta);
+        } else if (Number.isInteger(combineSkuId) && combineSkuId > 0) {
+            combineTotals.set(combineSkuId, (combineTotals.get(combineSkuId) || 0) + quantityDelta);
+        }
     }
 
-    return totals;
+    return { merchantTotals, combineTotals };
+};
+
+const getManualOrderMappingWhere = ({ companyId, merchantSkuIds = [], combineSkuIds = [], warehouseIds = [] }) => {
+    const conditions = [];
+    if (merchantSkuIds.length) conditions.push({ merchant_sku_id: { [Op.in]: merchantSkuIds } });
+    if (combineSkuIds.length) conditions.push({ combine_sku_id: { [Op.in]: combineSkuIds } });
+    return {
+        company_id: companyId,
+        is_active: true,
+        [Op.or]: conditions,
+        ...(warehouseIds.length ? {
+            [Op.and]: [{
+                [Op.or]: [
+                    { fulfillment_warehouse_id: { [Op.in]: warehouseIds } },
+                    { fulfillment_warehouse_id: null },
+                ],
+            }],
+        } : {}),
+    };
 };
 
 const pushManualOrderPlatformStockAdjustment = async ({ companyId, items = [], platform }) => {
     const { PlatformSkuMapping, PlatformStore } = require('../../models');
-    const adjustmentByMerchantSku = aggregateManualOrderAdjustments(items);
-    const merchantSkuIds = [...adjustmentByMerchantSku.keys()];
-    const warehouseIds = [...new Set(
-        items
-            .map((item) => Number(item.warehouseId || item.warehouse_id))
-            .filter((warehouseId) => Number.isInteger(warehouseId) && warehouseId > 0)
-    )];
+    const { merchantTotals, combineTotals } = aggregateManualOrderAdjustments(items);
+    const merchantSkuIds = [...merchantTotals.keys()];
+    const combineSkuIds = [...combineTotals.keys()];
+    const warehouseIds = [...new Set(items.map((item) => Number(item.warehouseId || item.warehouse_id)).filter((warehouseId) => Number.isInteger(warehouseId) && warehouseId > 0))];
 
-    if (!merchantSkuIds.length) return { total: 0, synced: 0, failed: 0, results: [] };
+    if (!merchantSkuIds.length && !combineSkuIds.length) return { total: 0, synced: 0, failed: 0, results: [] };
 
     const mappings = await PlatformSkuMapping.findAll({
-        where: {
-            company_id: companyId,
-            is_active: true,
-            merchant_sku_id: { [Op.in]: merchantSkuIds },
-            ...(warehouseIds.length ? {
-                [Op.or]: [
-                    { fulfillment_warehouse_id: { [Op.in]: warehouseIds } },
-                    { fulfillment_warehouse_id: null },
-                ],
-            } : {}),
-        },
+        where: getManualOrderMappingWhere({ companyId, merchantSkuIds, combineSkuIds, warehouseIds }),
         include: [{
             model: PlatformStore,
             as: 'platformStore',
@@ -771,92 +789,59 @@ const pushManualOrderPlatformStockAdjustment = async ({ companyId, items = [], p
 
     if (!mappings.length) return { total: 0, synced: 0, failed: 0, results: [] };
 
-    const results = await Promise.all(
-        mappings.map(async (mapping) => {
-            const quantityDelta = adjustmentByMerchantSku.get(Number(mapping.merchant_sku_id)) || 0;
-            const platformProduct = await findPlatformProductForMapping(mapping, platform);
+    const results = await Promise.all(mappings.map(async (mapping) => {
+        const quantityDelta = mapping.merchant_sku_id
+            ? merchantTotals.get(Number(mapping.merchant_sku_id)) || 0
+            : combineTotals.get(Number(mapping.combine_sku_id)) || 0;
+        const platformProduct = await findPlatformProductForMapping(mapping, platform);
 
-            if (!platformProduct) {
-                const error = `Platform stock snapshot not found for mapping ${mapping.id}`;
-                await mapping.update({ sync_status: 'failed', sync_error: error });
-                return {
-                    mappingId: mapping.id,
-                    merchantSkuId: mapping.merchant_sku_id,
-                    quantityDelta,
-                    success: false,
-                    error,
-                };
-            }
+        if (!platformProduct) {
+            const error = `Platform stock snapshot not found for mapping ${mapping.id}`;
+            await mapping.update({ sync_status: 'failed', sync_error: error });
+            return { mappingId: mapping.id, merchantSkuId: mapping.merchant_sku_id, combineSkuId: mapping.combine_sku_id, quantityDelta, success: false, error };
+        }
 
-            const currentPlatformStock = Math.max(0, Number(platformProduct.platform_stock || 0));
-            const nextPlatformStock = Math.max(0, currentPlatformStock + quantityDelta);
-            const result = platform === 'tiktok'
-                ? await callTikTokUpdateStock(mapping, nextPlatformStock)
-                : await callShopeeUpdateStock(mapping, nextPlatformStock);
+        const currentPlatformStock = Math.max(0, Number(platformProduct.platform_stock || 0));
+        const nextPlatformStock = Math.max(0, currentPlatformStock + quantityDelta);
+        const result = platform === 'tiktok'
+            ? await callTikTokUpdateStock(mapping, nextPlatformStock)
+            : await callShopeeUpdateStock(mapping, nextPlatformStock);
 
-            if (result.success) {
-                await Promise.all([
-                    mapping.update({
-                        sync_status: 'synced',
-                        last_synced_at: new Date(),
-                        sync_error: null,
-                    }),
-                    platformProduct.update({
-                        platform_stock: nextPlatformStock,
-                        synced_at: new Date(),
-                    }),
-                ]);
-            } else {
-                await mapping.update({
-                    sync_status: 'failed',
-                    sync_error: result.error,
-                });
-            }
+        if (result.success) {
+            await Promise.all([
+                mapping.update({ sync_status: 'synced', last_synced_at: new Date(), sync_error: null }),
+                platformProduct.update({ platform_stock: nextPlatformStock, synced_at: new Date() }),
+            ]);
+        } else {
+            await mapping.update({ sync_status: 'failed', sync_error: result.error });
+        }
 
-            return {
-                mappingId: mapping.id,
-                merchantSkuId: mapping.merchant_sku_id,
-                quantityDelta,
-                platformStockBefore: currentPlatformStock,
-                platformStockAfter: nextPlatformStock,
-                success: result.success,
-                error: result.error || null,
-            };
-        })
-    );
+        return {
+            mappingId: mapping.id,
+            merchantSkuId: mapping.merchant_sku_id,
+            combineSkuId: mapping.combine_sku_id,
+            quantityDelta,
+            platformStockBefore: currentPlatformStock,
+            platformStockAfter: nextPlatformStock,
+            success: result.success,
+            error: result.error || null,
+        };
+    }));
 
-    return {
-        total: results.length,
-        synced: results.filter((result) => result.success).length,
-        failed: results.filter((result) => !result.success).length,
-        results,
-    };
+    return { total: results.length, synced: results.filter((result) => result.success).length, failed: results.filter((result) => !result.success).length, results };
 };
 
 const pushManualOrderPlatformStockDeduction = async ({ companyId, items = [], platform }) => {
     const { PlatformSkuMapping, PlatformStore } = require('../../models');
-    const deductionByMerchantSku = aggregateManualOrderDeductions(items);
-    const merchantSkuIds = [...deductionByMerchantSku.keys()];
-    const warehouseIds = [...new Set(
-        items
-            .map((item) => Number(item.warehouseId || item.warehouse_id))
-            .filter((warehouseId) => Number.isInteger(warehouseId) && warehouseId > 0)
-    )];
+    const { merchantTotals, combineTotals } = aggregateManualOrderDeductions(items);
+    const merchantSkuIds = [...merchantTotals.keys()];
+    const combineSkuIds = [...combineTotals.keys()];
+    const warehouseIds = [...new Set(items.map((item) => Number(item.warehouseId || item.warehouse_id)).filter((warehouseId) => Number.isInteger(warehouseId) && warehouseId > 0))];
 
-    if (!merchantSkuIds.length) return { total: 0, synced: 0, failed: 0, results: [] };
+    if (!merchantSkuIds.length && !combineSkuIds.length) return { total: 0, synced: 0, failed: 0, results: [] };
 
     const mappings = await PlatformSkuMapping.findAll({
-        where: {
-            company_id: companyId,
-            is_active: true,
-            merchant_sku_id: { [Op.in]: merchantSkuIds },
-            ...(warehouseIds.length ? {
-                [Op.or]: [
-                    { fulfillment_warehouse_id: { [Op.in]: warehouseIds } },
-                    { fulfillment_warehouse_id: null },
-                ],
-            } : {}),
-        },
+        where: getManualOrderMappingWhere({ companyId, merchantSkuIds, combineSkuIds, warehouseIds }),
         include: [{
             model: PlatformStore,
             as: 'platformStore',
@@ -868,58 +853,37 @@ const pushManualOrderPlatformStockDeduction = async ({ companyId, items = [], pl
 
     if (!mappings.length) return { total: 0, synced: 0, failed: 0, results: [] };
 
-    const results = await Promise.all(
-        mappings.map(async (mapping) => {
-            const deductQty = deductionByMerchantSku.get(Number(mapping.merchant_sku_id)) || 0;
-            const result = await callPlatformReduceStock(mapping, platform, deductQty);
+    const results = await Promise.all(mappings.map(async (mapping) => {
+        const deductQty = mapping.merchant_sku_id
+            ? merchantTotals.get(Number(mapping.merchant_sku_id)) || 0
+            : combineTotals.get(Number(mapping.combine_sku_id)) || 0;
+        const result = await callPlatformReduceStock(mapping, platform, deductQty);
 
-            if (result.success) {
-                const updates = [
-                    mapping.update({
-                        sync_status: 'synced',
-                        last_synced_at: new Date(),
-                        sync_error: null,
-                    }),
-                ];
-
-                if (result.newQuantity !== null && result.newQuantity !== undefined) {
-                    const platformProduct = await findPlatformProductForMapping(mapping, platform);
-                    if (platformProduct) {
-                        updates.push(platformProduct.update({
-                            platform_stock: Math.max(0, Number(result.newQuantity || 0)),
-                            synced_at: new Date(),
-                        }));
-                    }
-                }
-
-                await Promise.all(updates);
-            } else {
-                await mapping.update({
-                    sync_status: 'failed',
-                    sync_error: result.error,
-                });
+        if (result.success) {
+            const updates = [mapping.update({ sync_status: 'synced', last_synced_at: new Date(), sync_error: null })];
+            if (result.newQuantity !== null && result.newQuantity !== undefined) {
+                const platformProduct = await findPlatformProductForMapping(mapping, platform);
+                if (platformProduct) updates.push(platformProduct.update({ platform_stock: Math.max(0, Number(result.newQuantity || 0)), synced_at: new Date() }));
             }
+            await Promise.all(updates);
+        } else {
+            await mapping.update({ sync_status: 'failed', sync_error: result.error });
+        }
 
-            return {
-                mappingId: mapping.id,
-                merchantSkuId: mapping.merchant_sku_id,
-                deducted: deductQty,
-                platformStockBefore: result.previousQuantity ?? null,
-                platformStockAfter: result.newQuantity ?? null,
-                success: result.success,
-                error: result.error || null,
-            };
-        })
-    );
+        return {
+            mappingId: mapping.id,
+            merchantSkuId: mapping.merchant_sku_id,
+            combineSkuId: mapping.combine_sku_id,
+            deducted: deductQty,
+            platformStockBefore: result.previousQuantity ?? null,
+            platformStockAfter: result.newQuantity ?? null,
+            success: result.success,
+            error: result.error || null,
+        };
+    }));
 
-    return {
-        total: results.length,
-        synced: results.filter((result) => result.success).length,
-        failed: results.filter((result) => !result.success).length,
-        results,
-    };
+    return { total: results.length, synced: results.filter((result) => result.success).length, failed: results.filter((result) => !result.success).length, results };
 };
-
 const buildWebhookUser = (companyId, actor = {}) => ({
     companyId,
     userId: actor.userId || actor.id || null,
@@ -1069,6 +1033,7 @@ const packFromOrderNotification = async (platform, payload, actor = {}) => {
         platformOrderItemId: data.platformOrderItemId || null,
         quantitySold: Number(data.quantitySold),
         overrideMerchantSkuId: skuOverride?.replacement_merchant_sku_id || null,
+        overrideCombineSkuId: skuOverride?.replacement_combine_sku_id || null,
         overrideWarehouseId: skuOverride?.replacement_warehouse_id || null,
     });
 
@@ -1092,6 +1057,7 @@ const packFromOrderNotification = async (platform, payload, actor = {}) => {
         skuOverrideId: skuOverride?.id || null,
         overrideApplied: Boolean(skuOverride),
         replacementMerchantSkuId: skuOverride?.replacement_merchant_sku_id || null,
+        replacementCombineSkuId: skuOverride?.replacement_combine_sku_id || null,
         replacementWarehouseId: skuOverride?.replacement_warehouse_id || null,
         syncMarkedOutOfSync: sync.markedCount,
         affectedMerchantSkuIds: sync.merchantSkuIds,
@@ -1144,7 +1110,7 @@ const finalizePackedOrderNotification = async (body, actor = {}) => {
 };
 
 const savePlatformOrderItemSkuOverride = async (body) => {
-    const { MerchantSku, PlatformOrderItemSkuOverride, SkuWarehouseStock, Warehouse } = require('../../models');
+    const { CombineSku, CombineSkuItem, MerchantSku, PlatformOrderItemSkuOverride, SkuWarehouseStock, Warehouse } = require('../../models');
     const platform = normalizeString(body.platform)?.toLowerCase();
     if (!['shopee', 'tiktok'].includes(platform)) {
         const err = new Error('platform must be shopee or tiktok');
@@ -1165,11 +1131,14 @@ const savePlatformOrderItemSkuOverride = async (body) => {
     }
 
     const replacementMerchantSkuId = Number(body.replacementMerchantSkuId || body.merchantSkuId);
+    const replacementCombineSkuId = Number(body.replacementCombineSkuId || body.combineSkuId);
     const replacementWarehouseId = Number(body.replacementWarehouseId || body.warehouseId);
     const quantity = Number(body.quantity || data.quantitySold || 1);
+    const hasMerchantSku = Number.isInteger(replacementMerchantSkuId) && replacementMerchantSkuId > 0;
+    const hasCombineSku = Number.isInteger(replacementCombineSkuId) && replacementCombineSkuId > 0;
 
-    if (!Number.isInteger(replacementMerchantSkuId) || replacementMerchantSkuId <= 0) {
-        const err = new Error('replacementMerchantSkuId is required');
+    if (hasMerchantSku === hasCombineSku) {
+        const err = new Error('Exactly one replacement SKU is required');
         err.statusCode = 400;
         throw err;
     }
@@ -1186,14 +1155,6 @@ const savePlatformOrderItemSkuOverride = async (body) => {
 
     const mapping = await resolvePlatformMapping(data);
     const companyId = Number(mapping.company_id);
-    const replacementSku = await MerchantSku.findOne({
-        where: { id: replacementMerchantSkuId, company_id: companyId, status: 'active', deleted_at: null },
-    });
-    if (!replacementSku) {
-        const err = new Error('Replacement merchant SKU not found');
-        err.statusCode = 404;
-        throw err;
-    }
 
     const replacementWarehouse = await Warehouse.findOne({
         where: { id: replacementWarehouseId, company_id: companyId, status: 'active' },
@@ -1204,18 +1165,65 @@ const savePlatformOrderItemSkuOverride = async (body) => {
         throw err;
     }
 
-    const stock = await SkuWarehouseStock.findOne({
-        where: {
-            company_id: companyId,
-            merchant_sku_id: replacementMerchantSkuId,
-            warehouse_id: replacementWarehouseId,
-        },
-    });
-    const qtyOnHand = Number(stock?.qty_on_hand || 0);
-    if (!stock || qtyOnHand < quantity) {
-        const err = new Error(`Insufficient replacement stock: available ${qtyOnHand}, requested ${quantity}`);
-        err.statusCode = 400;
-        throw err;
+    if (hasMerchantSku) {
+        const replacementSku = await MerchantSku.findOne({
+            where: { id: replacementMerchantSkuId, company_id: companyId, status: 'active', deleted_at: null },
+        });
+        if (!replacementSku) {
+            const err = new Error('Replacement merchant SKU not found');
+            err.statusCode = 404;
+            throw err;
+        }
+
+        const stock = await SkuWarehouseStock.findOne({
+            where: {
+                company_id: companyId,
+                merchant_sku_id: replacementMerchantSkuId,
+                warehouse_id: replacementWarehouseId,
+            },
+        });
+        const qtyOnHand = Number(stock?.qty_on_hand || 0);
+        if (!stock || qtyOnHand < quantity) {
+            const err = new Error(`Insufficient replacement stock: available ${qtyOnHand}, requested ${quantity}`);
+            err.statusCode = 400;
+            throw err;
+        }
+    } else {
+        const replacementSku = await CombineSku.findOne({
+            where: { id: replacementCombineSkuId, company_id: companyId, warehouse_id: replacementWarehouseId, status: 'active', deleted_at: null },
+        });
+        if (!replacementSku) {
+            const err = new Error('Replacement combine SKU not found in this warehouse');
+            err.statusCode = 404;
+            throw err;
+        }
+
+        const items = await CombineSkuItem.findAll({
+            where: { company_id: companyId, combine_sku_id: replacementCombineSkuId },
+            attributes: ['merchant_sku_id', 'quantity'],
+        });
+        if (!items.length) {
+            const err = new Error('Replacement combine SKU has no child SKU items');
+            err.statusCode = 400;
+            throw err;
+        }
+
+        for (const item of items) {
+            const requiredQty = Number(item.quantity || 0) * quantity;
+            const stock = await SkuWarehouseStock.findOne({
+                where: {
+                    company_id: companyId,
+                    merchant_sku_id: item.merchant_sku_id,
+                    warehouse_id: replacementWarehouseId,
+                },
+            });
+            const qtyOnHand = Number(stock?.qty_on_hand || 0);
+            if (!stock || qtyOnHand < requiredQty) {
+                const err = new Error(`Insufficient replacement stock: available ${qtyOnHand}, requested ${requiredQty}`);
+                err.statusCode = 400;
+                throw err;
+            }
+        }
     }
 
     const values = {
@@ -1230,7 +1238,8 @@ const savePlatformOrderItemSkuOverride = async (body) => {
         original_platform_mapping_id: mapping.id,
         original_merchant_sku_id: mapping.merchant_sku_id || null,
         original_combine_sku_id: mapping.combine_sku_id || null,
-        replacement_merchant_sku_id: replacementMerchantSkuId,
+        replacement_merchant_sku_id: hasMerchantSku ? replacementMerchantSkuId : null,
+        replacement_combine_sku_id: hasCombineSku ? replacementCombineSkuId : null,
         replacement_warehouse_id: replacementWarehouseId,
         quantity,
         reason: normalizeString(body.reason) || 'out_of_stock',
@@ -1261,6 +1270,7 @@ const savePlatformOrderItemSkuOverride = async (body) => {
         originalMerchantSkuId: override.original_merchant_sku_id,
         originalCombineSkuId: override.original_combine_sku_id,
         replacementMerchantSkuId: override.replacement_merchant_sku_id,
+        replacementCombineSkuId: override.replacement_combine_sku_id,
         replacementWarehouseId: override.replacement_warehouse_id,
         quantity: override.quantity,
         reason: override.reason,
@@ -1319,3 +1329,4 @@ module.exports = {
     pushManualOrderPlatformStockDeduction,
     pushManualOrderPlatformStockAdjustment,
 };
+

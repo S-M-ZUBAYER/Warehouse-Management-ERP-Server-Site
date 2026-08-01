@@ -1,13 +1,27 @@
-'use strict';
+﻿'use strict';
 const { body, query } = require('express-validator');
 
 const outboundLinesValidator = [
     body('lines')
         .notEmpty().withMessage('At least one SKU line is required')
         .isArray({ min: 1 }).withMessage('Lines must be a non-empty array'),
-    body('lines.*.merchantSkuId')
-        .notEmpty().withMessage('merchantSkuId is required in each line')
-        .isInt({ min: 1 }).withMessage('Invalid merchantSkuId'),
+    body('lines.*').custom((line) => {
+        const hasMerchant = Number(line?.merchantSkuId || line?.merchant_sku_id) > 0;
+        const hasCombine = Number(line?.combineSkuId || line?.combine_sku_id) > 0;
+        if (!hasMerchant || hasCombine) throw new Error('Each outbound line must include a merchantSkuId only');
+        return true;
+    }),
+    body('lines.*').optional().custom((line) => {
+        const hasMerchant = Number(line?.merchantSkuId || line?.merchant_sku_id) > 0;
+        const hasCombine = Number(line?.combineSkuId || line?.combine_sku_id) > 0;
+        if (!hasMerchant || hasCombine) throw new Error('Each outbound line must include a merchantSkuId only');
+        return true;
+    }),
+    body('lines.*.merchantSkuId').notEmpty().isInt({ min: 1 }).withMessage('Invalid merchantSkuId'),
+    body('lines.*.combineSkuId').optional().custom((value) => {
+        if (Number(value) > 0) throw new Error('Combine SKU cannot be used for outbound');
+        return true;
+    }),
     body('lines.*.qtyExpected')
         .notEmpty().withMessage('qtyExpected is required in each line')
         .isInt({ min: 1 }).withMessage('qtyExpected must be at least 1'),
@@ -40,7 +54,17 @@ const updateOutboundValidator = [
     body('receivingWarehouseAddress').trim().notEmpty().withMessage('Receiving warehouse full address is required').isLength({ max: 1000 }),
     body('notes').optional().trim(),
     body('lines').optional().isArray({ min: 1 }).withMessage('Lines must be a non-empty array'),
+    body('lines.*').optional().custom((line) => {
+        const hasMerchant = Number(line?.merchantSkuId || line?.merchant_sku_id) > 0;
+        const hasCombine = Number(line?.combineSkuId || line?.combine_sku_id) > 0;
+        if (!hasMerchant || hasCombine) throw new Error('Each outbound line must include a merchantSkuId only');
+        return true;
+    }),
     body('lines.*.merchantSkuId').optional().isInt({ min: 1 }).withMessage('Invalid merchantSkuId'),
+    body('lines.*.combineSkuId').optional().custom((value) => {
+        if (Number(value) > 0) throw new Error('Combine SKU cannot be used for outbound');
+        return true;
+    }),
     body('lines.*.qtyExpected').optional().isInt({ min: 1 }).withMessage('qtyExpected must be at least 1'),
     body('lines.*.unitCost').optional({ values: 'falsy' }).isDecimal({ decimal_digits: '0,2' }).withMessage('unitCost must be a decimal'),
     body('lines.*.currency').optional().trim().isLength({ max: 10 }),
@@ -102,3 +126,4 @@ module.exports = {
     receiveOutboundValidator,
     listOutboundValidator,
 };
+

@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize) => {
@@ -10,7 +10,8 @@ module.exports = (sequelize) => {
         },
         company_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
         outbound_order_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
-        merchant_sku_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
+        merchant_sku_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
+        combine_sku_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
         qty_expected: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
         qty_received: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
         unit_cost: { type: DataTypes.DECIMAL(15, 2), allowNull: true },
@@ -26,12 +27,14 @@ module.exports = (sequelize) => {
             { fields: ['company_id'], name: 'idx_iol_company' },
             { fields: ['outbound_order_id'], name: 'idx_iol_outbound_order' },
             { fields: ['merchant_sku_id'], name: 'idx_iol_merchant_sku' },
+            { fields: ['combine_sku_id'], name: 'idx_iol_merchant_sku_combine' },
         ],
     });
 
     OutboundOrderLine.associate = (models) => {
         OutboundOrderLine.belongsTo(models.OutboundOrder, { foreignKey: 'outbound_order_id', as: 'outboundOrder' });
         OutboundOrderLine.belongsTo(models.MerchantSku, { foreignKey: 'merchant_sku_id', as: 'merchantSku' });
+        OutboundOrderLine.belongsTo(models.CombineSku, { foreignKey: 'combine_sku_id', as: 'combineSku' });
     };
 
     return OutboundOrderLine;

@@ -23,12 +23,12 @@ router.get('/', listCombineSkuValidator, ctrl.getCombineSkus);
 router.get('/:id', ctrl.getCombineSkuById);
 
 // POST /api/v1/combine-skus
-router.post('/', requireRole('owner', 'admin', 'manager'), createCombineSkuValidator, ctrl.createCombineSku);
+router.post('/', createCombineSkuValidator, ctrl.createCombineSku);
 
 // PUT  /api/v1/combine-skus/:id
-router.put('/:id', requireRole('owner', 'admin', 'manager'), updateCombineSkuValidator, ctrl.updateCombineSku);
+router.put('/:id', updateCombineSkuValidator, ctrl.updateCombineSku);
 
 // DELETE /api/v1/combine-skus/:id
-router.delete('/:id', requireRole('owner', 'admin', 'manager'), ctrl.deleteCombineSku);
+router.delete('/:id', ctrl.deleteCombineSku);
 
 module.exports = router;

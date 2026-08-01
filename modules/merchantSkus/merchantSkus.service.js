@@ -14,6 +14,7 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const redis = require('../../config/redis');
+const { applyWarehouseScope, assertWarehousePermission } = require('../../utils/permissions');
 
 const cacheKey = (companyId, suffix = '') =>
     `company:${companyId}:cache:merchant_skus${suffix ? ':' + suffix : ''}`;
@@ -111,7 +112,7 @@ const normalizeMerchantSkuImage = (image) => {
 const getWarehouseDropdown = async (user) => {
     const { Warehouse } = require('../../models');
     return Warehouse.findAll({
-        where: { company_id: user.companyId, status: 'active' },
+        where: await applyWarehouseScope(user, { company_id: user.companyId, status: 'active' }),
         attributes: ['id', 'name', 'code', 'is_default'],
         order: [['is_default', 'DESC'], ['name', 'ASC']],
     });
@@ -139,7 +140,12 @@ const getMerchantSkus = async (user, filters = {}) => {
 
     const where = { company_id: user.companyId, deleted_at: null };
 
-    if (warehouseId && warehouseId !== 'all') where.warehouse_id = warehouseId;
+    if (warehouseId && warehouseId !== 'all') {
+        await assertWarehousePermission(user, warehouseId);
+        where.warehouse_id = warehouseId;
+    } else {
+        Object.assign(where, await applyWarehouseScope(user, {}, 'warehouse_id'));
+    }
 
     if (status && status !== 'all') {
         if (status === 'in_stock') { /* handled in post-filter below */ }
@@ -238,6 +244,7 @@ const getMerchantSkuById = async (user, skuId) => {
         err.statusCode = 404;
         throw err;
     }
+    if (sku.warehouse_id) await assertWarehousePermission(user, sku.warehouse_id);
 
     // Attach aggregated stock totals at the top level for easy consumption
     const stockRows = Array.isArray(sku.stock) ? sku.stock : (sku.stock ? [sku.stock] : []);
@@ -278,6 +285,7 @@ const createMerchantSku = async (user, data) => {
 
     // Validate warehouse
     if (warehouseId) {
+        await assertWarehousePermission(user, warehouseId, { canEdit: true });
         const wh = await Warehouse.findOne({ where: { id: warehouseId, company_id: user.companyId } });
         if (!wh) {
             const err = new Error('Invalid warehouse');
@@ -339,6 +347,7 @@ const updateMerchantSku = async (user, skuId, data) => {
         err.statusCode = 404;
         throw err;
     }
+    if (sku.warehouse_id) await assertWarehousePermission(user, sku.warehouse_id, { canEdit: true });
 
     const updates = {};
     if (data.skuName !== undefined) {
@@ -366,7 +375,10 @@ const updateMerchantSku = async (user, skuId, data) => {
         }
     }
     if (data.skuTitle !== undefined) updates.sku_title = data.skuTitle.trim();
-    if (data.warehouseId !== undefined) updates.warehouse_id = data.warehouseId;
+    if (data.warehouseId !== undefined) {
+        await assertWarehousePermission(user, data.warehouseId, { canEdit: true });
+        updates.warehouse_id = data.warehouseId;
+    }
     if (data.gtin !== undefined) updates.gtin = data.gtin;
     if (data.productDetails !== undefined) updates.product_details = data.productDetails;
     if (data.weight !== undefined) updates.weight = data.weight;

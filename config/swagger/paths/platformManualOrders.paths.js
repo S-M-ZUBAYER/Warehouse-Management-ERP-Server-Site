@@ -1,4 +1,4 @@
-const shipmentStatuses = ['Processed', 'On The Way', 'Shipped', 'Delivered', 'Completed', 'Cancelled'];
+﻿const shipmentStatuses = ['Processed', 'On The Way', 'Shipped', 'Delivered', 'Completed', 'Cancelled'];
 
 module.exports = {
     schemas: {
@@ -28,9 +28,12 @@ module.exports = {
         PlatformManualOrderProduct: {
             type: 'object',
             required: ['id', 'qty'],
+            description: 'Provide exactly one of merchantSkuId or combineSkuId.',
             properties: {
-                id: { type: 'string', example: '334', description: 'Merchant SKU ID' },
-                merchantSkuId: { type: 'string', example: '334' },
+                id: { type: 'string', example: 'merchant:334', description: 'Stable frontend row ID' },
+                merchantSkuId: { type: 'string', nullable: true, example: '334' },
+                combineSkuId: { type: 'string', nullable: true, example: null },
+                skuType: { type: 'string', enum: ['merchant', 'combine'], example: 'merchant' },
                 sku: { type: 'string', example: 'PUNCHCARD' },
                 name: { type: 'string', example: 'Punch Card' },
                 qty: { type: 'number', example: 2 },
@@ -76,10 +79,13 @@ module.exports = {
                 warehouseId: { type: 'string', example: '3' },
             },
         },
-        PlatformManualMerchantSkuOption: {
+        PlatformManualSkuOption: {
             type: 'object',
             properties: {
-                id: { type: 'string', example: '334' },
+                id: { type: 'string', example: 'merchant:334' },
+                merchantSkuId: { type: 'string', nullable: true, example: '334' },
+                combineSkuId: { type: 'string', nullable: true, example: null },
+                skuType: { type: 'string', enum: ['merchant', 'combine'], example: 'merchant' },
                 sku: { type: 'string', example: 'PUNCHCARD' },
                 name: { type: 'string', example: 'Punch Card' },
                 image: { type: 'string', example: 'https://cdn.example.com/image.jpg' },
@@ -142,7 +148,7 @@ module.exports = {
                                     logistic: { type: 'string', example: '{"trackingNumber":"SPXMY123456789","deliveryCompany":"Shopee Xpress"}' },
                                     sender: { type: 'string', example: '{"name":"Warehouse","phone":"+60123456789","address":"Sender address","country":"Malaysia","state":"Selangor","city":"Petaling Jaya","zipCode":"47800"}' },
                                     buyer: { type: 'string', example: '{"name":"Buyer","phone":"+60123456789","email":"buyer@example.com","address":"Buyer address","country":"Malaysia","state":"Selangor","city":"Petaling Jaya","area":"","zipCode":"47800","unit":""}' },
-                                    products: { type: 'string', example: '[{"id":"334","sku":"PUNCHCARD","name":"Punch Card","qty":2,"unitPrice":499,"weight":0.2}]' },
+                                    products: { type: 'string', example: '[{"id":"merchant:334","merchantSkuId":"334","sku":"PUNCHCARD","name":"Punch Card","qty":2,"unitPrice":499,"weight":0.2}]' },
                                     package: { type: 'string', example: '{"weight":"1.2","length":"10","width":"8","height":"5"}' },
                                 },
                             },
@@ -167,17 +173,18 @@ module.exports = {
                         'multipart/form-data': {
                             schema: {
                                 type: 'object',
-                                required: ['warehouseId', 'orderNumber', 'orderTime', 'orderDate', 'logistic', 'sender', 'buyer', 'products'],
+                                required: [],
+                                description: 'Updates editable fields only. Existing warehouse, sender information, and product lines are preserved.',
                                 properties: {
-                                    warehouseId: { type: 'string', example: '3' },
+                                    warehouseId: { type: 'string', example: '3', readOnly: true, description: 'Ignored on update. Existing warehouse is kept.' },
                                     orderNumber: { type: 'string', example: 'PMO-10001' },
                                     orderTime: { type: 'string', example: '14:30' },
                                     orderDate: { type: 'string', format: 'date', example: '2026-07-16' },
                                     waybillFile: { type: 'string', format: 'binary', description: 'Optional. Existing waybill is kept when omitted.' },
                                     logistic: { type: 'string', example: '{"trackingNumber":"SPXMY123456789","deliveryCompany":"Shopee Xpress"}' },
-                                    sender: { type: 'string', example: '{"name":"Warehouse","phone":"+60123456789","address":"Sender address","country":"Malaysia","state":"Selangor","city":"Petaling Jaya","zipCode":"47800"}' },
+                                    sender: { type: 'string', readOnly: true, description: 'Ignored on update. Existing sender information is kept.', example: '{"name":"Warehouse","phone":"+60123456789","address":"Sender address","country":"Malaysia","state":"Selangor","city":"Petaling Jaya","zipCode":"47800"}' },
                                     buyer: { type: 'string', example: '{"name":"Buyer","phone":"+60123456789","email":"buyer@example.com","address":"Buyer address","country":"Malaysia","state":"Selangor","city":"Petaling Jaya","area":"","zipCode":"47800","unit":""}' },
-                                    products: { type: 'string', example: '[{"id":"334","sku":"PUNCHCARD","name":"Punch Card","qty":2,"unitPrice":499,"weight":0.2}]' },
+                                    products: { type: 'string', readOnly: true, description: 'Ignored on update. Existing product lines and quantities are kept.', example: '[{"id":"merchant:334","merchantSkuId":"334","sku":"PUNCHCARD","name":"Punch Card","qty":2,"unitPrice":499,"weight":0.2}]' },
                                     package: { type: 'string', example: '{"weight":"1.2","length":"10","width":"8","height":"5"}' },
                                 },
                             },
@@ -238,9 +245,11 @@ module.exports = {
                     { in: 'query', name: 'search', schema: { type: 'string' } },
                 ],
                 responses: {
-                    200: { description: 'Merchant SKU options', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/PlatformManualMerchantSkuOption' } } } } },
+                    200: { description: 'SKU options', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/PlatformManualSkuOption' } } } } },
                 },
             },
         },
     },
 };
+
+

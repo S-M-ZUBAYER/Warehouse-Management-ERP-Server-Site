@@ -21,15 +21,15 @@ router.get('/', listWarehouseValidator, warehouseController.getWarehouses);
 router.get('/:id', warehouseController.getWarehouseById);
 
 // POST /api/v1/warehouses          — create warehouse (owner/admin only)
-router.post('/', requireRole('owner', 'admin', 'manager'), createWarehouseValidator, warehouseController.createWarehouse);
+router.post('/', createWarehouseValidator, warehouseController.createWarehouse);
 
 // PUT  /api/v1/warehouses/:id      — update warehouse (owner/admin only)
-router.put('/:id', requireRole('owner', 'admin', 'manager'), updateWarehouseValidator, warehouseController.updateWarehouse);
+router.put('/:id', updateWarehouseValidator, warehouseController.updateWarehouse);
 
 // DELETE /api/v1/warehouses/:id    — delete warehouse (owner/admin only)
-router.delete('/:id', requireRole('owner', 'admin', 'manager'), warehouseController.deleteWarehouse);
+router.delete('/:id', warehouseController.deleteWarehouse);
 
 // PATCH /api/v1/warehouses/:id/set-default  — set as default (owner/admin only)
-router.patch('/:id/set-default', requireRole('owner', 'admin', 'manager'), warehouseController.setDefaultWarehouse);
+router.patch('/:id/set-default', warehouseController.setDefaultWarehouse);
 
 module.exports = router;

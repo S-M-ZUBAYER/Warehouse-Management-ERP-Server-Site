@@ -51,15 +51,15 @@ router.get('/', ctrl.getPlatformSkuMappings);
 router.get('/:id', ctrl.getPlatformSkuMappingById);
 
 // POST /api/v1/platform-sku-mappings
-router.post('/', requireRole('owner', 'admin', 'manager'), createValidator, ctrl.createPlatformSkuMapping);
+router.post('/', createValidator, ctrl.createPlatformSkuMapping);
 
 // PUT /api/v1/platform-sku-mappings/:id
-router.put('/:id', requireRole('owner', 'admin', 'manager'), ctrl.updatePlatformSkuMapping);
+router.put('/:id', ctrl.updatePlatformSkuMapping);
 
 // PUT /api/v1/platform-sku-mappings/:id/sync-callback  — Java writes back platform listing IDs
 router.put('/:id/sync-callback', syncCallbackValidator, ctrl.syncCallback);
 
 // DELETE /api/v1/platform-sku-mappings/:id
-router.delete('/:id', requireRole('owner', 'admin', 'manager'), ctrl.deletePlatformSkuMapping);
+router.delete('/:id', ctrl.deletePlatformSkuMapping);
 
 module.exports = router;

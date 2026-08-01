@@ -27,7 +27,7 @@ router.get('/picker', ctrl.getSkuPicker);
 router.get('/manual', ctrl.getManualInboundOrders);
 
 // POST /api/v1/inbound/manual      — create manual inbound receipt (direct → completed)
-router.post('/manual', requireRole('owner', 'admin', 'manager'), createManualInboundValidator, ctrl.createManualInbound);
+router.post('/manual', createManualInboundValidator, ctrl.createManualInbound);
 
 // GET /api/v1/inbound              — list with filters
 router.get('/', listInboundValidator, ctrl.getInboundOrders);
@@ -36,18 +36,18 @@ router.get('/', listInboundValidator, ctrl.getInboundOrders);
 router.get('/:id', ctrl.getInboundOrderById);
 
 // POST /api/v1/inbound             — create draft
-router.post('/', requireRole('owner', 'admin', 'manager'), createInboundValidator, ctrl.createInboundOrder);
+router.post('/', createInboundValidator, ctrl.createInboundOrder);
 
 // PUT /api/v1/inbound/:id          — update draft (fields + lines)
-router.put('/:id', requireRole('owner', 'admin', 'manager'), ctrl.updateDraftInbound);
+router.put('/:id', ctrl.updateDraftInbound);
 
 // PUT /api/v1/inbound/:id/ship     — confirm draft → on_the_way
-router.put('/:id/ship', requireRole('owner', 'admin', 'manager'), shipInboundValidator, ctrl.shipInboundOrder);
+router.put('/:id/ship', shipInboundValidator, ctrl.shipInboundOrder);
 
 // PUT /api/v1/inbound/:id/receive  — warehouse receives → completed + stock update
 router.put('/:id/receive', requireRole('owner', 'admin', 'manager', 'warehouse'), receiveInboundValidator, ctrl.receiveInboundOrder);
 
 // PUT /api/v1/inbound/:id/cancel   — cancel (draft or on_the_way only)
-router.put('/:id/cancel', requireRole('owner', 'admin', 'manager'), ctrl.cancelInboundOrder);
+router.put('/:id/cancel', ctrl.cancelInboundOrder);
 
 module.exports = router;
