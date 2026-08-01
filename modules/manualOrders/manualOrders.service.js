@@ -2581,7 +2581,7 @@ const getManualOrderDropdowns = async (user) => {
 
     const warehouses = await Warehouse.findAll({
         where: await applyWarehouseScope(user, { company_id: companyId, status: "active" }),
-        attributes: ["id", "name", "code", "location", "city", "country", "manager_name", "phone", "is_default"],
+        attributes: ["id", "name", "code", "location", "city", "state", "zip_code", "country", "manager_name", "phone", "is_default"],
         order: [["is_default", "DESC"], ["name", "ASC"]],
         raw: true,
     });

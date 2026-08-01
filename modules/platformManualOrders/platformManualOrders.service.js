@@ -497,7 +497,7 @@ const listCompanyWarehouses = async (user, query = {}) => {
     const companyId = resolveCompanyId(user, query.companyId);
     const rows = await Warehouse.findAll({
         where: await applyWarehouseScope(user, { company_id: companyId, status: 'active' }),
-        attributes: ['id', 'name', 'code'],
+        attributes: ['id', 'name', 'code', 'location', 'city', 'state', 'zip_code', 'country', 'manager_name', 'phone'],
         order: [['is_default', 'DESC'], ['name', 'ASC']],
     });
     return rows.map((warehouse) => ({
@@ -505,6 +505,13 @@ const listCompanyWarehouses = async (user, query = {}) => {
         name: warehouse.name,
         code: warehouse.code,
         warehouseId: String(warehouse.id),
+        location: warehouse.location,
+        city: warehouse.city,
+        state: warehouse.state,
+        zip_code: warehouse.zip_code,
+        country: warehouse.country,
+        manager_name: warehouse.manager_name,
+        phone: warehouse.phone,
     }));
 };
 

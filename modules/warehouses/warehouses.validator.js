@@ -53,6 +53,21 @@ const createWarehouseValidator = [
         .trim()
         .isLength({ max: 100 }).withMessage('City max 100 characters'),
 
+    body('state')
+        .optional({ nullable: true })
+        .trim()
+        .isLength({ max: 100 }).withMessage('State max 100 characters'),
+
+    body('zipCode')
+        .optional({ nullable: true })
+        .trim()
+        .isLength({ max: 30 }).withMessage('ZIP Code max 30 characters'),
+
+    body('zip_code')
+        .optional({ nullable: true })
+        .trim()
+        .isLength({ max: 30 }).withMessage('ZIP Code max 30 characters'),
+
     body('country')
         .optional({ nullable: true })    // ✅ fixed
         .trim()
@@ -93,6 +108,21 @@ const updateWarehouseValidator = [
         .optional({ nullable: true })    // ✅ fixed
         .trim()
         .isLength({ max: 100 }),
+
+    body('state')
+        .optional({ nullable: true })
+        .trim()
+        .isLength({ max: 100 }),
+
+    body('zipCode')
+        .optional({ nullable: true })
+        .trim()
+        .isLength({ max: 30 }),
+
+    body('zip_code')
+        .optional({ nullable: true })
+        .trim()
+        .isLength({ max: 30 }),
 
     body('country')
         .optional({ nullable: true })    // ✅ fixed

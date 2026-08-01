@@ -52,6 +52,9 @@ const getWarehouses = async (user, filters = {}) => {
             { name: { [Op.like]: `%${search}%` } },
             { code: { [Op.like]: `%${search}%` } },
             { location: { [Op.like]: `%${search}%` } },
+            { city: { [Op.like]: `%${search}%` } },
+            { state: { [Op.like]: `%${search}%` } },
+            { zip_code: { [Op.like]: `%${search}%` } },
         ];
     }
 
@@ -148,7 +151,8 @@ const getWarehouseById = async (user, warehouseId) => {
 // ─── Create Warehouse ─────────────────────────────────────────────────────────
 const createWarehouse = async (user, data) => {
     const { Warehouse } = require('../../models');
-    const { name, attribute, managerName, phone, location, city, country, status } = data;
+    const { name, attribute, managerName, phone, location, city, state, zipCode, country, status } = data;
+    const normalizedZipCode = zipCode ?? data.zip_code;
     // ── Duplicate name check ──────────────────────────────────────────────
     const existing = await Warehouse.findOne({
         where: { company_id: user.companyId, name: name.trim() },
@@ -178,6 +182,8 @@ const createWarehouse = async (user, data) => {
         phone: phone || null,
         location: location || null,
         city: city || null,
+        state: state || null,
+        zip_code: normalizedZipCode || null,
         country: country || null,
         is_default: warehouseCount === 0,
         status: status || 'active',
@@ -225,6 +231,8 @@ const updateWarehouse = async (user, warehouseId, data) => {
     if (data.phone !== undefined) updates.phone = data.phone;
     if (data.location !== undefined) updates.location = data.location;
     if (data.city !== undefined) updates.city = data.city;
+    if (data.state !== undefined) updates.state = data.state;
+    if (data.zipCode !== undefined || data.zip_code !== undefined) updates.zip_code = data.zipCode ?? data.zip_code;
     if (data.country !== undefined) updates.country = data.country;
     if (data.status !== undefined) updates.status = data.status;
 
