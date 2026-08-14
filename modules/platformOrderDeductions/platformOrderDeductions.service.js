@@ -4,8 +4,10 @@ const axios = require('axios');
 const { Op } = require('sequelize');
 const stockService = require('../stock/stock.service');
 
-const SHOPEE_STOCK_UPDATE_BASE_URL = process.env.SHOPEE_STOCK_UPDATE_BASE_URL || 'https://grozziie.zjweiting.com:3091';
-const TIKTOK_STOCK_UPDATE_BASE_URL = process.env.TIKTOK_STOCK_UPDATE_BASE_URL || 'https://grozziie.zjweiting.com:3091';
+const normalizeBaseUrl = (value) => String(value || '').replace(/\/+$/, '');
+const JAVA_API_BASE_URL = normalizeBaseUrl(process.env.JAVA_API_URL || 'https://grozziie.zjweiting.com:3091');
+const SHOPEE_STOCK_UPDATE_BASE_URL = JAVA_API_BASE_URL;
+const TIKTOK_STOCK_UPDATE_BASE_URL = JAVA_API_BASE_URL;
 
 const normalizeString = (value) => {
     if (value === undefined || value === null) return null;
@@ -173,7 +175,6 @@ const resolvePlatformMapping = async (data) => {
         where: buildMappingWhere(data, store.id),
         limit: 2,
     });
-console.log(mappings,"mappings,.................");
 
     if (!mappings.length) {
         const err = new Error('Platform SKU mapping not found for the supplied order item identifiers');
@@ -297,6 +298,167 @@ const getQtyForMapping = async (companyId, mapping) => {
     }
 
     return 0;
+};
+
+const lockSkuWarehouseStock = async ({ SkuWarehouseStock, companyId, merchantSkuId, warehouseId, transaction }) => {
+    const stock = await SkuWarehouseStock.findOne({
+        where: { company_id: companyId, merchant_sku_id: merchantSkuId, warehouse_id: warehouseId },
+        lock: transaction.LOCK.UPDATE,
+        transaction,
+    });
+
+    if (!stock) {
+        const err = new Error(`No stock record for merchant SKU ${merchantSkuId} in warehouse ${warehouseId}`);
+        err.statusCode = 400;
+        throw err;
+    }
+
+    return stock;
+};
+
+const reserveMerchantStock = async ({ SkuWarehouseStock, companyId, merchantSkuId, warehouseId, quantity, transaction }) => {
+    const stock = await lockSkuWarehouseStock({ SkuWarehouseStock, companyId, merchantSkuId, warehouseId, transaction });
+    const qtyOnHand = Number(stock.qty_on_hand || 0);
+    const qtyReserved = Number(stock.qty_reserved || 0);
+    const qtyAvailable = Math.max(0, qtyOnHand - qtyReserved);
+
+    if (qtyAvailable < quantity) {
+        const err = new Error(`Insufficient available stock for merchant SKU ${merchantSkuId}: available ${qtyAvailable}, requested ${quantity}`);
+        err.statusCode = 400;
+        throw err;
+    }
+
+    await stock.update({ qty_reserved: qtyReserved + quantity }, { transaction });
+    return merchantSkuId;
+};
+
+const releaseMerchantStock = async ({ SkuWarehouseStock, companyId, merchantSkuId, warehouseId, quantity, transaction }) => {
+    const stock = await SkuWarehouseStock.findOne({
+        where: { company_id: companyId, merchant_sku_id: merchantSkuId, warehouse_id: warehouseId },
+        lock: transaction.LOCK.UPDATE,
+        transaction,
+    });
+
+    if (!stock) return null;
+    await stock.update({ qty_reserved: Math.max(0, Number(stock.qty_reserved || 0) - quantity) }, { transaction });
+    return merchantSkuId;
+};
+
+const reserveSkuSelection = async ({ SkuWarehouseStock, CombineSkuItem, companyId, merchantSkuId, combineSkuId, warehouseId, quantity, transaction }) => {
+    const affectedSkuIds = [];
+    if (merchantSkuId) {
+        affectedSkuIds.push(await reserveMerchantStock({ SkuWarehouseStock, companyId, merchantSkuId, warehouseId, quantity, transaction }));
+        return affectedSkuIds.filter(Boolean);
+    }
+
+    const items = await CombineSkuItem.findAll({
+        where: { company_id: companyId, combine_sku_id: combineSkuId },
+        attributes: ['merchant_sku_id', 'quantity'],
+        transaction,
+    });
+
+    for (const item of items) {
+        const reserveQty = Number(item.quantity || 0) * quantity;
+        affectedSkuIds.push(await reserveMerchantStock({
+            SkuWarehouseStock,
+            companyId,
+            merchantSkuId: item.merchant_sku_id,
+            warehouseId,
+            quantity: reserveQty,
+            transaction,
+        }));
+    }
+
+    return affectedSkuIds.filter(Boolean);
+};
+
+const releaseSkuSelection = async ({ SkuWarehouseStock, CombineSkuItem, companyId, merchantSkuId, combineSkuId, warehouseId, quantity, transaction }) => {
+    const affectedSkuIds = [];
+    if (merchantSkuId) {
+        affectedSkuIds.push(await releaseMerchantStock({ SkuWarehouseStock, companyId, merchantSkuId, warehouseId, quantity, transaction }));
+        return affectedSkuIds.filter(Boolean);
+    }
+
+    if (!combineSkuId) return [];
+    const items = await CombineSkuItem.findAll({
+        where: { company_id: companyId, combine_sku_id: combineSkuId },
+        attributes: ['merchant_sku_id', 'quantity'],
+        transaction,
+    });
+
+    for (const item of items) {
+        const releaseQty = Number(item.quantity || 0) * quantity;
+        affectedSkuIds.push(await releaseMerchantStock({
+            SkuWarehouseStock,
+            companyId,
+            merchantSkuId: item.merchant_sku_id,
+            warehouseId,
+            quantity: releaseQty,
+            transaction,
+        }));
+    }
+
+    return affectedSkuIds.filter(Boolean);
+};
+
+const releaseOriginalReservation = async ({ SkuWarehouseStock, CombineSkuItem, companyId, mapping, quantity, transaction }) => (
+    releaseSkuSelection({
+        SkuWarehouseStock,
+        CombineSkuItem,
+        companyId,
+        merchantSkuId: mapping.merchant_sku_id,
+        combineSkuId: mapping.combine_sku_id,
+        warehouseId: mapping.fulfillment_warehouse_id,
+        quantity,
+        transaction,
+    })
+);
+
+const reserveAdjustmentSelection = async ({ SkuWarehouseStock, CombineSkuItem, companyId, values, transaction }) => (
+    reserveSkuSelection({
+        SkuWarehouseStock,
+        CombineSkuItem,
+        companyId,
+        merchantSkuId: values.replacement_merchant_sku_id,
+        combineSkuId: values.replacement_combine_sku_id,
+        warehouseId: values.replacement_warehouse_id,
+        quantity: Number(values.quantity || 1),
+        transaction,
+    })
+);
+
+const releaseAdjustmentReservation = async ({ SkuWarehouseStock, CombineSkuItem, companyId, adjustment, transaction }) => (
+    releaseSkuSelection({
+        SkuWarehouseStock,
+        CombineSkuItem,
+        companyId,
+        merchantSkuId: adjustment.replacement_merchant_sku_id,
+        combineSkuId: adjustment.replacement_combine_sku_id,
+        warehouseId: adjustment.replacement_warehouse_id,
+        quantity: Number(adjustment.quantity || 1),
+        transaction,
+    })
+);
+
+const recomputeAffectedCombineSkus = async ({ CombineSkuItem, companyId, merchantSkuIds = [], combineSkuId = null }) => {
+    const combineIds = new Set();
+    if (combineSkuId) combineIds.add(Number(combineSkuId));
+
+    const skuIds = [...new Set(merchantSkuIds.filter(Boolean).map((id) => Number(id)).filter(Boolean))];
+    if (skuIds.length) {
+        const rows = await CombineSkuItem.findAll({
+            where: { company_id: companyId, merchant_sku_id: { [Op.in]: skuIds } },
+            attributes: ['combine_sku_id'],
+            raw: true,
+        });
+        rows.forEach((row) => {
+            if (row.combine_sku_id) combineIds.add(Number(row.combine_sku_id));
+        });
+    }
+
+    for (const id of combineIds) {
+        await stockService.recomputeCombineSku(companyId, id).catch(() => null);
+    }
 };
 
 const getShopeeIds = (mapping) => {
@@ -514,10 +676,121 @@ const callTikTokReduceStock = async (mapping, reduceQty) => {
     }
 };
 
+const callShopeeIncreaseStock = async (mapping, increaseQty) => {
+    const { shopId, itemId, modelId } = getShopeeIds(mapping);
+    const quantity = Number(increaseQty);
+
+    if (!shopId || !itemId || !modelId) {
+        return {
+            success: false,
+            error: `Missing Shopee identifiers for mapping ${mapping.id}`,
+        };
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+        return { success: true, skipped: true, reason: 'No Shopee quantity to increase' };
+    }
+
+    try {
+        const response = await axios.post(
+            `${SHOPEE_STOCK_UPDATE_BASE_URL}/new-shopee-open-shop/api/dev/product/increase_stock/${shopId}`,
+            {
+                item_id: Number(itemId),
+                model_id: Number(modelId),
+                increase_quantity: quantity,
+            },
+            { headers: { 'Content-Type': 'application/json' } }
+        );
+
+        const shopeeResponse = response.data?.shopee_response ?? response.data;
+        const failureList = shopeeResponse?.response?.failure_list ?? [];
+        if (failureList.length > 0 || shopeeResponse?.error) {
+            return {
+                success: false,
+                error: `Shopee increase failure: ${JSON.stringify(failureList.length ? failureList : shopeeResponse?.error)}`,
+            };
+        }
+
+        return {
+            success: true,
+            previousQuantity: response.data?.previous_stock ?? null,
+            newQuantity: response.data?.updated_stock ?? null,
+        };
+    } catch (err) {
+        return {
+            success: false,
+            error: err?.response?.data?.message ?? err.message,
+        };
+    }
+};
+
+const callTikTokIncreaseStock = async (mapping, increaseQty) => {
+    const productId = normalizeString(mapping.platform_product_id) || normalizeString(mapping.platform_listing_id);
+    const skuId = normalizeString(mapping.platform_sku_id) || normalizeString(mapping.platform_model_id);
+    const warehouseId = normalizeString(mapping.platform_warehouse_id);
+    const openId = normalizeString(mapping.platform_open_id);
+    const cipherId = normalizeString(mapping.platform_cipher_id);
+    const quantity = Number(increaseQty);
+
+    if (!productId || !skuId || !warehouseId || !openId || !cipherId) {
+        return {
+            success: false,
+            error: `Missing TikTok identifiers for mapping ${mapping.id}`,
+        };
+    }
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+        return { success: true, skipped: true, reason: 'No TikTok quantity to increase' };
+    }
+
+    try {
+        const response = await axios.post(
+            `${TIKTOK_STOCK_UPDATE_BASE_URL}/tiktokshop-partner-country/api/dev/products/increaseStock`,
+            {
+                skuId,
+                warehouseId,
+                increaseQuantity: quantity,
+            },
+            {
+                params: {
+                    productId,
+                    openId,
+                    cipher: cipherId,
+                },
+                headers: { 'Content-Type': 'application/json' },
+            }
+        );
+
+        const updateResponse = response.data?.updateResponse ?? response.data;
+        if (updateResponse?.code !== undefined && updateResponse.code !== 0) {
+            return {
+                success: false,
+                error: `TikTok increase error: ${updateResponse?.message ?? 'Unknown'}`,
+            };
+        }
+
+        return {
+            success: true,
+            previousQuantity: response.data?.previousQuantity ?? null,
+            newQuantity: response.data?.newQuantity ?? null,
+        };
+    } catch (err) {
+        return {
+            success: false,
+            error: err?.response?.data?.message ?? err.message,
+        };
+    }
+};
+
 const callPlatformReduceStock = (mapping, platform, reduceQty) => (
     platform === 'tiktok'
         ? callTikTokReduceStock(mapping, reduceQty)
         : callShopeeReduceStock(mapping, reduceQty)
+);
+
+const callPlatformIncreaseStock = (mapping, platform, increaseQty) => (
+    platform === 'tiktok'
+        ? callTikTokIncreaseStock(mapping, increaseQty)
+        : callShopeeIncreaseStock(mapping, increaseQty)
 );
 
 const pushRelatedPlatformStock = async ({ companyId, merchantSkuIds, combineSkuId, platform }) => {
@@ -748,7 +1021,7 @@ const aggregateManualOrderAdjustments = (items = []) => {
     return { merchantTotals, combineTotals };
 };
 
-const getManualOrderMappingWhere = ({ companyId, merchantSkuIds = [], combineSkuIds = [], warehouseIds = [] }) => {
+const getManualOrderMappingWhere = ({ companyId, merchantSkuIds = [], combineSkuIds = [], warehouseIds = [], platformStoreIds = [] }) => {
     const conditions = [];
     if (merchantSkuIds.length) conditions.push({ merchant_sku_id: { [Op.in]: merchantSkuIds } });
     if (combineSkuIds.length) conditions.push({ combine_sku_id: { [Op.in]: combineSkuIds } });
@@ -756,6 +1029,7 @@ const getManualOrderMappingWhere = ({ companyId, merchantSkuIds = [], combineSku
         company_id: companyId,
         is_active: true,
         [Op.or]: conditions,
+        ...(platformStoreIds.length ? { platform_store_id: { [Op.in]: platformStoreIds } } : {}),
         ...(warehouseIds.length ? {
             [Op.and]: [{
                 [Op.or]: [
@@ -773,11 +1047,12 @@ const pushManualOrderPlatformStockAdjustment = async ({ companyId, items = [], p
     const merchantSkuIds = [...merchantTotals.keys()];
     const combineSkuIds = [...combineTotals.keys()];
     const warehouseIds = [...new Set(items.map((item) => Number(item.warehouseId || item.warehouse_id)).filter((warehouseId) => Number.isInteger(warehouseId) && warehouseId > 0))];
+    const platformStoreIds = [...new Set(items.map((item) => Number(item.platformStoreId || item.platform_store_id)).filter((storeId) => Number.isInteger(storeId) && storeId > 0))];
 
     if (!merchantSkuIds.length && !combineSkuIds.length) return { total: 0, synced: 0, failed: 0, results: [] };
 
     const mappings = await PlatformSkuMapping.findAll({
-        where: getManualOrderMappingWhere({ companyId, merchantSkuIds, combineSkuIds, warehouseIds }),
+        where: getManualOrderMappingWhere({ companyId, merchantSkuIds, combineSkuIds, warehouseIds, platformStoreIds }),
         include: [{
             model: PlatformStore,
             as: 'platformStore',
@@ -837,11 +1112,12 @@ const pushManualOrderPlatformStockDeduction = async ({ companyId, items = [], pl
     const merchantSkuIds = [...merchantTotals.keys()];
     const combineSkuIds = [...combineTotals.keys()];
     const warehouseIds = [...new Set(items.map((item) => Number(item.warehouseId || item.warehouse_id)).filter((warehouseId) => Number.isInteger(warehouseId) && warehouseId > 0))];
+    const platformStoreIds = [...new Set(items.map((item) => Number(item.platformStoreId || item.platform_store_id)).filter((storeId) => Number.isInteger(storeId) && storeId > 0))];
 
     if (!merchantSkuIds.length && !combineSkuIds.length) return { total: 0, synced: 0, failed: 0, results: [] };
 
     const mappings = await PlatformSkuMapping.findAll({
-        where: getManualOrderMappingWhere({ companyId, merchantSkuIds, combineSkuIds, warehouseIds }),
+        where: getManualOrderMappingWhere({ companyId, merchantSkuIds, combineSkuIds, warehouseIds, platformStoreIds }),
         include: [{
             model: PlatformStore,
             as: 'platformStore',
@@ -875,6 +1151,73 @@ const pushManualOrderPlatformStockDeduction = async ({ companyId, items = [], pl
             merchantSkuId: mapping.merchant_sku_id,
             combineSkuId: mapping.combine_sku_id,
             deducted: deductQty,
+            platformStockBefore: result.previousQuantity ?? null,
+            platformStockAfter: result.newQuantity ?? null,
+            success: result.success,
+            error: result.error || null,
+        };
+    }));
+
+    return { total: results.length, synced: results.filter((result) => result.success).length, failed: results.filter((result) => !result.success).length, results };
+};
+
+const pushManualOrderPlatformStockIncrease = async ({ companyId, items = [], platform }) => {
+    const { PlatformSkuMapping, PlatformStore } = require('../../models');
+    const { merchantTotals, combineTotals } = aggregateManualOrderAdjustments(items);
+    const merchantSkuIds = [...merchantTotals.keys()];
+    const combineSkuIds = [...combineTotals.keys()];
+    const warehouseIds = [...new Set(items.map((item) => Number(item.warehouseId || item.warehouse_id)).filter((warehouseId) => Number.isInteger(warehouseId) && warehouseId > 0))];
+    const platformStoreIds = [...new Set(items.map((item) => Number(item.platformStoreId || item.platform_store_id)).filter((storeId) => Number.isInteger(storeId) && storeId > 0))];
+
+    if (!merchantSkuIds.length && !combineSkuIds.length) return { total: 0, synced: 0, failed: 0, results: [] };
+
+    const mappings = await PlatformSkuMapping.findAll({
+        where: getManualOrderMappingWhere({ companyId, merchantSkuIds, combineSkuIds, warehouseIds, platformStoreIds }),
+        include: [{
+            model: PlatformStore,
+            as: 'platformStore',
+            where: { platform, is_active: true },
+            attributes: ['id', 'platform', 'external_store_id', 'store_shop_id'],
+            required: true,
+        }],
+    });
+
+    if (!mappings.length) return { total: 0, synced: 0, failed: 0, results: [] };
+
+    const results = await Promise.all(mappings.map(async (mapping) => {
+        const increaseQty = mapping.merchant_sku_id
+            ? Math.max(0, merchantTotals.get(Number(mapping.merchant_sku_id)) || 0)
+            : Math.max(0, combineTotals.get(Number(mapping.combine_sku_id)) || 0);
+
+        if (!increaseQty) {
+            return {
+                mappingId: mapping.id,
+                merchantSkuId: mapping.merchant_sku_id,
+                combineSkuId: mapping.combine_sku_id,
+                increased: 0,
+                success: true,
+                skipped: true,
+            };
+        }
+
+        const result = await callPlatformIncreaseStock(mapping, platform, increaseQty);
+
+        if (result.success) {
+            const updates = [mapping.update({ sync_status: 'synced', last_synced_at: new Date(), sync_error: null })];
+            if (result.newQuantity !== null && result.newQuantity !== undefined) {
+                const platformProduct = await findPlatformProductForMapping(mapping, platform);
+                if (platformProduct) updates.push(platformProduct.update({ platform_stock: Math.max(0, Number(result.newQuantity || 0)), synced_at: new Date() }));
+            }
+            await Promise.all(updates);
+        } else {
+            await mapping.update({ sync_status: 'failed', sync_error: result.error });
+        }
+
+        return {
+            mappingId: mapping.id,
+            merchantSkuId: mapping.merchant_sku_id,
+            combineSkuId: mapping.combine_sku_id,
+            increased: increaseQty,
             platformStockBefore: result.previousQuantity ?? null,
             platformStockAfter: result.newQuantity ?? null,
             success: result.success,
@@ -966,6 +1309,197 @@ const deductFromOrderNotification = async (platform, payload, actor = {}) => {
     };
 };
 
+const cancelReservedOrderNotification = async (platform, payload, actor = {}) => {
+    const data = { ...payload, platform };
+    const mapping = await resolvePlatformMapping(data);
+    const companyId = Number(mapping.company_id);
+
+    if (!Number.isInteger(companyId) || companyId <= 0) {
+        const err = new Error('Matched platform SKU mapping does not have a valid company_id');
+        err.statusCode = 500;
+        throw err;
+    }
+
+    const { sequelize, CombineSkuItem, OrderSaleLine, PlatformOrderItemSkuOverride, SkuWarehouseStock } = require('../../models');
+    const platformOrderItemId = data.platformOrderItemId || null;
+    const saleLineWhereClause = {
+        platform_sku_mapping_id: mapping.id,
+        platform_order_id: data.platformOrderId,
+        platform_order_item_id: platformOrderItemId,
+    };
+    const saleLine = await OrderSaleLine.findOne({ where: saleLineWhereClause });
+
+    if (saleLine?.deducted) {
+        return {
+            alreadyDeducted: true,
+            alreadyPacked: true,
+            alreadyReleased: false,
+            platform: data.platform,
+            platformOrderId: data.platformOrderId,
+            platformOrderItemId,
+            platformMappingId: mapping.id,
+            releasedReservations: [],
+            platformStockIncrease: null,
+        };
+    }
+
+    const activeAdjustments = await PlatformOrderItemSkuOverride.findAll({
+        where: {
+            company_id: companyId,
+            platform: data.platform,
+            platform_order_id: data.platformOrderId,
+            original_platform_mapping_id: mapping.id,
+            status: 'active',
+            [Op.or]: [
+                { adjustment_type: 'add' },
+                { platform_order_item_id: platformOrderItemId },
+            ],
+        },
+        order: [['id', 'ASC']],
+    });
+    const activeExchange = activeAdjustments.find((item) =>
+        item.adjustment_type === 'exchange' &&
+        normalizeString(item.platform_order_item_id) === normalizeString(platformOrderItemId)
+    );
+
+    if (!saleLine && !activeAdjustments.length) {
+        return {
+            alreadyReleased: true,
+            alreadyDeducted: false,
+            platform: data.platform,
+            platformOrderId: data.platformOrderId,
+            platformOrderItemId,
+            platformMappingId: mapping.id,
+            releasedReservations: [],
+            platformStockIncrease: null,
+        };
+    }
+
+    const increaseQty = Number(saleLine?.quantity_sold || data.quantitySold || 1);
+    const platformStockIncrease = await callPlatformIncreaseStock(mapping, data.platform, increaseQty) || {
+        success: false,
+        error: 'Platform stock increase returned no response',
+    };
+    if (!platformStockIncrease.success) {
+        const err = new Error(platformStockIncrease.error || 'Platform stock increase failed');
+        err.statusCode = 502;
+        err.details = platformStockIncrease;
+        throw err;
+    }
+
+    const affectedSkuIds = [];
+    const releasedReservations = [];
+
+    await sequelize.transaction(async (transaction) => {
+        const lockedSaleLine = saleLine
+            ? await OrderSaleLine.findOne({
+                where: saleLineWhereClause,
+                lock: transaction.LOCK.UPDATE,
+                transaction,
+            })
+            : null;
+
+        if (lockedSaleLine?.deducted) {
+            const err = new Error('Reserved stock cannot be released because this order item is already deducted');
+            err.statusCode = 409;
+            throw err;
+        }
+
+        const lockedAdjustments = await PlatformOrderItemSkuOverride.findAll({
+            where: {
+                company_id: companyId,
+                platform: data.platform,
+                platform_order_id: data.platformOrderId,
+                original_platform_mapping_id: mapping.id,
+                status: 'active',
+                [Op.or]: [
+                    { adjustment_type: 'add' },
+                    { platform_order_item_id: platformOrderItemId },
+                ],
+            },
+            lock: transaction.LOCK.UPDATE,
+            transaction,
+        });
+        const lockedExchange = lockedAdjustments.find((item) =>
+            item.adjustment_type === 'exchange' &&
+            normalizeString(item.platform_order_item_id) === normalizeString(platformOrderItemId)
+        );
+
+        for (const adjustment of lockedAdjustments) {
+            affectedSkuIds.push(...await releaseAdjustmentReservation({
+                SkuWarehouseStock,
+                CombineSkuItem,
+                companyId,
+                adjustment,
+                transaction,
+            }));
+            releasedReservations.push({
+                type: adjustment.adjustment_type,
+                adjustmentId: adjustment.id,
+                quantity: Number(adjustment.quantity || 1),
+            });
+            await adjustment.update({ status: 'cancelled' }, { transaction });
+        }
+
+        if (lockedSaleLine && !lockedExchange) {
+            const releaseQty = Number(lockedSaleLine.quantity_sold || data.quantitySold || 1);
+            affectedSkuIds.push(...await releaseOriginalReservation({
+                SkuWarehouseStock,
+                CombineSkuItem,
+                companyId,
+                mapping,
+                quantity: releaseQty,
+                transaction,
+            }));
+            releasedReservations.push({
+                type: 'original',
+                saleLineId: lockedSaleLine.id,
+                quantity: releaseQty,
+            });
+        }
+
+        if (lockedSaleLine) {
+            await lockedSaleLine.destroy({ transaction });
+        }
+    });
+
+    await recomputeAffectedCombineSkus({
+        CombineSkuItem,
+        companyId,
+        merchantSkuIds: affectedSkuIds,
+        combineSkuId: mapping.combine_sku_id || null,
+    });
+
+    const updates = [
+        mapping.update({
+            sync_status: 'synced',
+            last_synced_at: new Date(),
+            sync_error: null,
+        }),
+    ];
+    if (platformStockIncrease.newQuantity !== null && platformStockIncrease.newQuantity !== undefined) {
+        const platformProduct = await findPlatformProductForMapping(mapping, data.platform);
+        if (platformProduct) {
+            updates.push(platformProduct.update({
+                platform_stock: Math.max(0, Number(platformStockIncrease.newQuantity || 0)),
+                synced_at: new Date(),
+            }));
+        }
+    }
+    await Promise.all(updates);
+
+    return {
+        alreadyReleased: false,
+        alreadyDeducted: false,
+        platform: data.platform,
+        platformOrderId: data.platformOrderId,
+        platformOrderItemId,
+        platformMappingId: mapping.id,
+        releasedReservations,
+        platformStockIncrease,
+    };
+};
+
 const normalizeOrderItemPayload = (body, item = {}) => {
     const order = body.order || body;
     const context = body.context || order.context || {};
@@ -1008,8 +1542,24 @@ const findActiveSkuOverride = async ({ data, mapping, companyId }) => {
             platform_order_id: data.platformOrderId,
             platform_order_item_id: platformOrderItemId,
             original_platform_mapping_id: mapping.id,
+            adjustment_type: 'exchange',
             status: 'active',
         },
+    });
+};
+
+const findActiveAddSkuAdjustments = async ({ data, mapping, companyId }) => {
+    const { PlatformOrderItemSkuOverride } = require('../../models');
+    return PlatformOrderItemSkuOverride.findAll({
+        where: {
+            company_id: companyId,
+            platform: data.platform,
+            platform_order_id: data.platformOrderId,
+            original_platform_mapping_id: mapping.id,
+            adjustment_type: 'add',
+            status: 'active',
+        },
+        order: [['id', 'ASC']],
     });
 };
 
@@ -1026,19 +1576,42 @@ const packFromOrderNotification = async (platform, payload, actor = {}) => {
 
     const user = buildWebhookUser(companyId, actor);
     const skuOverride = await findActiveSkuOverride({ data, mapping, companyId });
+    const addSkuAdjustments = await findActiveAddSkuAdjustments({ data, mapping, companyId });
 
     const packed = await stockService.packReservedStock(user, {
         platformMappingId: mapping.id,
         platformOrderId: data.platformOrderId,
         platformOrderItemId: data.platformOrderItemId || null,
-        quantitySold: Number(data.quantitySold),
+        quantitySold: Number(skuOverride?.quantity || data.quantitySold),
         overrideMerchantSkuId: skuOverride?.replacement_merchant_sku_id || null,
         overrideCombineSkuId: skuOverride?.replacement_combine_sku_id || null,
         overrideWarehouseId: skuOverride?.replacement_warehouse_id || null,
     });
 
+    const addSkuPackResults = [];
+    for (const addAdjustment of addSkuAdjustments) {
+        const addPacked = await stockService.packReservedStock(user, {
+            platformMappingId: mapping.id,
+            platformOrderId: data.platformOrderId,
+            platformOrderItemId: addAdjustment.platform_order_item_id,
+            quantitySold: Number(addAdjustment.quantity || 1),
+            overrideMerchantSkuId: addAdjustment.replacement_merchant_sku_id || null,
+            overrideCombineSkuId: addAdjustment.replacement_combine_sku_id || null,
+            overrideWarehouseId: addAdjustment.replacement_warehouse_id || null,
+        });
+
+        if (addPacked.alreadyPacked || addPacked.alreadyDeducted) {
+            await addAdjustment.update({ status: 'packed', packed_at: addAdjustment.packed_at || new Date() });
+        }
+
+        addSkuPackResults.push({
+            adjustmentId: addAdjustment.id,
+            ...addPacked,
+        });
+    }
+
     if (skuOverride && (packed.alreadyPacked || packed.alreadyDeducted)) {
-        await skuOverride.destroy();
+        await skuOverride.update({ status: 'packed', packed_at: skuOverride.packed_at || new Date() });
     }
 
     const { sync, platformStockSync } = await afterStockChangeSync({
@@ -1059,6 +1632,7 @@ const packFromOrderNotification = async (platform, payload, actor = {}) => {
         replacementMerchantSkuId: skuOverride?.replacement_merchant_sku_id || null,
         replacementCombineSkuId: skuOverride?.replacement_combine_sku_id || null,
         replacementWarehouseId: skuOverride?.replacement_warehouse_id || null,
+        addSkuAdjustmentsPacked: addSkuPackResults,
         syncMarkedOutOfSync: sync.markedCount,
         affectedMerchantSkuIds: sync.merchantSkuIds,
         platformStockSync,
@@ -1110,7 +1684,7 @@ const finalizePackedOrderNotification = async (body, actor = {}) => {
 };
 
 const savePlatformOrderItemSkuOverride = async (body) => {
-    const { CombineSku, CombineSkuItem, MerchantSku, PlatformOrderItemSkuOverride, SkuWarehouseStock, Warehouse } = require('../../models');
+    const { sequelize, CombineSku, CombineSkuItem, MerchantSku, OrderSaleLine, PlatformOrderItemSkuOverride, SkuWarehouseStock, Warehouse } = require('../../models');
     const platform = normalizeString(body.platform)?.toLowerCase();
     if (!['shopee', 'tiktok'].includes(platform)) {
         const err = new Error('platform must be shopee or tiktok');
@@ -1118,16 +1692,24 @@ const savePlatformOrderItemSkuOverride = async (body) => {
         throw err;
     }
 
-    const data = { ...normalizeOrderItemPayload(body), platform };
+    const adjustmentType = normalizeString(body.adjustmentType || body.adjustment_type || body.type) === 'add' ? 'add' : 'exchange';
+    const mappingPayload = adjustmentType === 'add' && body.sourceItem
+        ? { ...body, item: body.sourceItem }
+        : body;
+    const data = { ...normalizeOrderItemPayload(mappingPayload, mappingPayload.item || {}), platform };
     if (!data.platformOrderId) {
         const err = new Error('orderId is required');
         err.statusCode = 400;
         throw err;
     }
-    if (!data.platformOrderItemId) {
+    if (adjustmentType === 'exchange' && !data.platformOrderItemId) {
         const err = new Error('platformOrderItemId is required for SKU override');
         err.statusCode = 400;
         throw err;
+    }
+    if (adjustmentType === 'add') {
+        data.platformOrderItemId = normalizeString(body.platformOrderItemId || body.orderItemId || body.addLineId)
+            || `ADD-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     }
 
     const replacementMerchantSkuId = Number(body.replacementMerchantSkuId || body.merchantSkuId);
@@ -1183,8 +1765,10 @@ const savePlatformOrderItemSkuOverride = async (body) => {
             },
         });
         const qtyOnHand = Number(stock?.qty_on_hand || 0);
-        if (!stock || qtyOnHand < quantity) {
-            const err = new Error(`Insufficient replacement stock: available ${qtyOnHand}, requested ${quantity}`);
+        const qtyReserved = Number(stock?.qty_reserved || 0);
+        const qtyAvailable = Math.max(0, qtyOnHand - qtyReserved);
+        if (!stock || qtyAvailable < quantity) {
+            const err = new Error(`Insufficient replacement stock: available ${qtyAvailable}, requested ${quantity}`);
             err.statusCode = 400;
             throw err;
         }
@@ -1218,8 +1802,10 @@ const savePlatformOrderItemSkuOverride = async (body) => {
                 },
             });
             const qtyOnHand = Number(stock?.qty_on_hand || 0);
-            if (!stock || qtyOnHand < requiredQty) {
-                const err = new Error(`Insufficient replacement stock: available ${qtyOnHand}, requested ${requiredQty}`);
+            const qtyReserved = Number(stock?.qty_reserved || 0);
+            const qtyAvailable = Math.max(0, qtyOnHand - qtyReserved);
+            if (!stock || qtyAvailable < requiredQty) {
+                const err = new Error(`Insufficient replacement stock: available ${qtyAvailable}, requested ${requiredQty}`);
                 err.statusCode = 400;
                 throw err;
             }
@@ -1231,6 +1817,7 @@ const savePlatformOrderItemSkuOverride = async (body) => {
         platform,
         platform_order_id: data.platformOrderId,
         platform_order_item_id: data.platformOrderItemId,
+        adjustment_type: adjustmentType,
         platform_store_id: mapping.platform_store_id || null,
         shop_id: data.shopId || null,
         open_id: data.openId || null,
@@ -1242,30 +1829,113 @@ const savePlatformOrderItemSkuOverride = async (body) => {
         replacement_combine_sku_id: hasCombineSku ? replacementCombineSkuId : null,
         replacement_warehouse_id: replacementWarehouseId,
         quantity,
+        source_tab: normalizeString(body.sourceTab || body.source_tab),
+        display_section: normalizeString(body.displaySection || body.display_section),
         reason: normalizeString(body.reason) || 'out_of_stock',
         note: normalizeString(body.note),
         status: 'active',
         packed_at: null,
     };
 
-    const existing = await PlatformOrderItemSkuOverride.findOne({
-        where: {
-            company_id: companyId,
-            platform,
-            platform_order_id: data.platformOrderId,
-            platform_order_item_id: data.platformOrderItemId,
-        },
+    let override;
+    const affectedSkuIds = [];
+
+    await sequelize.transaction(async (transaction) => {
+        const existing = await PlatformOrderItemSkuOverride.findOne({
+            where: {
+                company_id: companyId,
+                platform,
+                platform_order_id: data.platformOrderId,
+                platform_order_item_id: data.platformOrderItemId,
+            },
+            lock: transaction.LOCK.UPDATE,
+            transaction,
+        });
+
+        if (existing?.status === 'packed') {
+            const err = new Error('Packed SKU adjustment cannot be changed');
+            err.statusCode = 400;
+            throw err;
+        }
+
+        if (existing) {
+            affectedSkuIds.push(...await releaseAdjustmentReservation({
+                SkuWarehouseStock,
+                CombineSkuItem,
+                companyId,
+                adjustment: existing,
+                transaction,
+            }));
+        } else if (adjustmentType === 'exchange') {
+            const originalSaleLine = await OrderSaleLine.findOne({
+                where: {
+                    platform_sku_mapping_id: mapping.id,
+                    platform_order_id: data.platformOrderId,
+                    platform_order_item_id: data.platformOrderItemId || null,
+                    deducted: false,
+                },
+                lock: transaction.LOCK.UPDATE,
+                transaction,
+            });
+            const originalReleaseQty = Number(originalSaleLine?.quantity_sold || data.quantitySold || 1);
+
+            if (originalReleaseQty > 0) {
+                affectedSkuIds.push(...await releaseOriginalReservation({
+                    SkuWarehouseStock,
+                    CombineSkuItem,
+                    companyId,
+                    mapping,
+                    quantity: originalReleaseQty,
+                    transaction,
+                }));
+            }
+        }
+
+        affectedSkuIds.push(...await reserveAdjustmentSelection({
+            SkuWarehouseStock,
+            CombineSkuItem,
+            companyId,
+            values,
+            transaction,
+        }));
+
+        override = existing
+            ? await existing.update(values, { transaction })
+            : await PlatformOrderItemSkuOverride.create(values, { transaction });
+
+        await OrderSaleLine.findOrCreate({
+            where: {
+                platform_sku_mapping_id: mapping.id,
+                platform_order_id: data.platformOrderId,
+                platform_order_item_id: data.platformOrderItemId || null,
+            },
+            defaults: {
+                company_id: companyId,
+                platform_sku_mapping_id: mapping.id,
+                platform_order_id: data.platformOrderId,
+                platform_order_item_id: data.platformOrderItemId || null,
+                quantity_sold: quantity,
+                deducted: false,
+                deducted_at: null,
+                sold_at: new Date(),
+            },
+            transaction,
+        });
     });
 
-    const override = existing
-        ? await existing.update(values)
-        : await PlatformOrderItemSkuOverride.create(values);
+    await recomputeAffectedCombineSkus({
+        CombineSkuItem,
+        companyId,
+        merchantSkuIds: affectedSkuIds,
+        combineSkuId: hasCombineSku ? replacementCombineSkuId : null,
+    });
 
     return {
         id: override.id,
         platform: override.platform,
         platformOrderId: override.platform_order_id,
         platformOrderItemId: override.platform_order_item_id,
+        adjustmentType: override.adjustment_type,
         originalPlatformMappingId: override.original_platform_mapping_id,
         originalMerchantSkuId: override.original_merchant_sku_id,
         originalCombineSkuId: override.original_combine_sku_id,
@@ -1273,14 +1943,127 @@ const savePlatformOrderItemSkuOverride = async (body) => {
         replacementCombineSkuId: override.replacement_combine_sku_id,
         replacementWarehouseId: override.replacement_warehouse_id,
         quantity: override.quantity,
+        sourceTab: override.source_tab,
+        displaySection: override.display_section,
         reason: override.reason,
         note: override.note,
         status: override.status,
     };
 };
 
+const parseOrderIds = (value) => {
+    if (Array.isArray(value)) return value.map(normalizeString).filter(Boolean);
+    const text = normalizeString(value);
+    if (!text) return [];
+    try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) return parsed.map(normalizeString).filter(Boolean);
+    } catch (_err) {
+        // Fall back to comma-separated IDs.
+    }
+    return text.split(',').map(normalizeString).filter(Boolean);
+};
+
+const getSkuDisplay = (sku, fallbackId) => ({
+    id: sku?.id || fallbackId || null,
+    sku: sku?.sku_name || sku?.sku || sku?.combine_sku_code || null,
+    name: sku?.sku_title || sku?.combine_name || sku?.name || sku?.sku_name || sku?.combine_sku_code || null,
+    image: sku?.image_url || null,
+});
+
+const serializeSkuAdjustment = (row) => {
+    const plain = row?.get ? row.get({ plain: true }) : row;
+    const originalSku = plain.originalMerchantSku
+        ? getSkuDisplay(plain.originalMerchantSku, plain.original_merchant_sku_id)
+        : getSkuDisplay(plain.originalCombineSku, plain.original_combine_sku_id);
+    const replacementSku = plain.replacementMerchantSku
+        ? getSkuDisplay(plain.replacementMerchantSku, plain.replacement_merchant_sku_id)
+        : getSkuDisplay(plain.replacementCombineSku, plain.replacement_combine_sku_id);
+
+    return {
+        id: plain.id,
+        platform: plain.platform,
+        platformOrderId: plain.platform_order_id,
+        platformOrderItemId: plain.platform_order_item_id,
+        adjustmentType: plain.adjustment_type || 'exchange',
+        originalPlatformMappingId: plain.original_platform_mapping_id,
+        originalMerchantSkuId: plain.original_merchant_sku_id,
+        originalCombineSkuId: plain.original_combine_sku_id,
+        replacementMerchantSkuId: plain.replacement_merchant_sku_id,
+        replacementCombineSkuId: plain.replacement_combine_sku_id,
+        replacementWarehouseId: plain.replacement_warehouse_id,
+        replacementWarehouseName: plain.replacementWarehouse?.name || null,
+        quantity: plain.quantity,
+        sourceTab: plain.source_tab,
+        displaySection: plain.display_section,
+        reason: plain.reason,
+        note: plain.note,
+        status: plain.status,
+        originalSku,
+        replacementSku,
+    };
+};
+
+const listPlatformOrderSkuAdjustments = async (query = {}) => {
+    const { CombineSku, MerchantSku, PlatformOrderItemSkuOverride, Warehouse } = require('../../models');
+    const platform = normalizeString(query.platform)?.toLowerCase();
+    const orderIds = parseOrderIds(query.orderIds || query.orderId || query.platformOrderId);
+    const summaryOnly = String(query.summary || query.summaryOnly || '').toLowerCase() === 'true';
+    const platformStoreId = normalizeString(query.platformStoreId || query.platform_store_id);
+    const excludeWithdraw = String(query.excludeWithdraw || '').toLowerCase() === 'true';
+
+    if (platform && !['shopee', 'tiktok'].includes(platform)) {
+        const err = new Error('platform must be shopee or tiktok');
+        err.statusCode = 400;
+        throw err;
+    }
+    if (!orderIds.length && !summaryOnly) return [];
+
+    const where = {
+        ...(platform ? { platform } : {}),
+        ...(orderIds.length ? { platform_order_id: { [Op.in]: orderIds } } : {}),
+        ...(platformStoreId ? { platform_store_id: platformStoreId } : {}),
+        ...(excludeWithdraw
+            ? { [Op.or]: [{ source_tab: { [Op.ne]: 'Withdraw' } }, { source_tab: null }] }
+            : {}),
+        status: 'active',
+    };
+
+    if (summaryOnly) {
+        const rows = await PlatformOrderItemSkuOverride.findAll({
+            where,
+            attributes: ['id', 'platform', 'platform_order_id', 'adjustment_type', 'source_tab', 'display_section'],
+            order: [['platform_order_id', 'ASC'], ['id', 'ASC']],
+            raw: true,
+        });
+
+        return rows.map((row) => ({
+            id: row.id,
+            platform: row.platform,
+            platformOrderId: row.platform_order_id,
+            adjustmentType: row.adjustment_type,
+            sourceTab: row.source_tab,
+            displaySection: row.display_section,
+        }));
+    }
+
+    const rows = await PlatformOrderItemSkuOverride.findAll({
+        where,
+        include: [
+            { model: MerchantSku, as: 'originalMerchantSku', attributes: ['id', 'sku_name', 'sku_title', 'image_url'], required: false },
+            { model: CombineSku, as: 'originalCombineSku', attributes: ['id', 'combine_sku_code', 'combine_name', 'image_url'], required: false },
+            { model: MerchantSku, as: 'replacementMerchantSku', attributes: ['id', 'sku_name', 'sku_title', 'image_url'], required: false },
+            { model: CombineSku, as: 'replacementCombineSku', attributes: ['id', 'combine_sku_code', 'combine_name', 'image_url'], required: false },
+            { model: Warehouse, as: 'replacementWarehouse', attributes: ['id', 'name', 'code'], required: false },
+        ],
+        order: [['platform_order_id', 'ASC'], ['adjustment_type', 'DESC'], ['id', 'ASC']],
+    });
+
+    return rows.map(serializeSkuAdjustment);
+};
+
 const deletePlatformOrderSkuOverrides = async (body) => {
-    const { PlatformOrderItemSkuOverride } = require('../../models');
+    const { sequelize, CombineSkuItem, OrderSaleLine, PlatformOrderItemSkuOverride, PlatformSkuMapping, SkuWarehouseStock } = require('../../models');
     const platform = normalizeString(body.platform)?.toLowerCase();
     if (!['shopee', 'tiktok'].includes(platform)) {
         const err = new Error('platform must be shopee or tiktok');
@@ -1289,6 +2072,7 @@ const deletePlatformOrderSkuOverrides = async (body) => {
     }
 
     const data = { ...normalizeOrderItemPayload(body), platform };
+    const adjustmentId = Number(body.adjustmentId || body.id || 0);
     if (!data.platformOrderId) {
         const err = new Error('orderId is required');
         err.statusCode = 400;
@@ -1302,31 +2086,114 @@ const deletePlatformOrderSkuOverrides = async (body) => {
     addEqualsFilter(storeFilters, 'cipher_id', data.cipherId);
 
     const where = {
+        ...(Number.isInteger(adjustmentId) && adjustmentId > 0 ? { id: adjustmentId } : {}),
         platform,
         platform_order_id: data.platformOrderId,
         ...(data.platformOrderItemId ? { platform_order_item_id: data.platformOrderItemId } : {}),
+        ...(normalizeString(body.adjustmentType || body.adjustment_type) ? { adjustment_type: normalizeString(body.adjustmentType || body.adjustment_type) } : {}),
         ...(storeFilters.length ? { [Op.or]: storeFilters } : {}),
     };
 
-    const deletedCount = await PlatformOrderItemSkuOverride.destroy({ where });
+    const affectedSkuIds = [];
+    const affectedCompanyIds = new Set();
+    let deletedCount = 0;
+
+    await sequelize.transaction(async (transaction) => {
+        const rows = await PlatformOrderItemSkuOverride.findAll({
+            where,
+            lock: transaction.LOCK.UPDATE,
+            transaction,
+        });
+
+        for (const adjustment of rows) {
+            if (adjustment.status === 'packed') {
+                const err = new Error('Packed SKU adjustment cannot be deleted');
+                err.statusCode = 400;
+                throw err;
+            }
+
+            const companyId = Number(adjustment.company_id);
+            affectedCompanyIds.add(companyId);
+            affectedSkuIds.push(...await releaseAdjustmentReservation({
+                SkuWarehouseStock,
+                CombineSkuItem,
+                companyId,
+                adjustment,
+                transaction,
+            }));
+
+            if (adjustment.adjustment_type === 'exchange') {
+                const mapping = await PlatformSkuMapping.findOne({
+                    where: { id: adjustment.original_platform_mapping_id, company_id: companyId },
+                    lock: transaction.LOCK.UPDATE,
+                    transaction,
+                });
+                const saleLine = await OrderSaleLine.findOne({
+                    where: {
+                        platform_sku_mapping_id: adjustment.original_platform_mapping_id,
+                        platform_order_id: adjustment.platform_order_id,
+                        platform_order_item_id: adjustment.platform_order_item_id || null,
+                        deducted: false,
+                    },
+                    lock: transaction.LOCK.UPDATE,
+                    transaction,
+                });
+
+                if (mapping && saleLine) {
+                    affectedSkuIds.push(...await reserveSkuSelection({
+                        SkuWarehouseStock,
+                        CombineSkuItem,
+                        companyId,
+                        merchantSkuId: mapping.merchant_sku_id,
+                        combineSkuId: mapping.combine_sku_id,
+                        warehouseId: mapping.fulfillment_warehouse_id,
+                        quantity: Number(saleLine.quantity_sold || adjustment.quantity || 1),
+                        transaction,
+                    }));
+                }
+            } else if (adjustment.adjustment_type === 'add') {
+                await OrderSaleLine.destroy({
+                    where: {
+                        platform_sku_mapping_id: adjustment.original_platform_mapping_id,
+                        platform_order_id: adjustment.platform_order_id,
+                        platform_order_item_id: adjustment.platform_order_item_id || null,
+                        deducted: false,
+                    },
+                    transaction,
+                });
+            }
+
+            await adjustment.destroy({ transaction });
+            deletedCount += 1;
+        }
+    });
+
+    if (affectedSkuIds.length) {
+        for (const companyId of affectedCompanyIds) {
+            await recomputeAffectedCombineSkus({ CombineSkuItem, companyId, merchantSkuIds: affectedSkuIds }).catch(() => null);
+        }
+    }
 
     return {
         platform,
         platformOrderId: data.platformOrderId,
         platformOrderItemId: data.platformOrderItemId || null,
+        adjustmentId: Number.isInteger(adjustmentId) && adjustmentId > 0 ? adjustmentId : null,
         deletedCount,
     };
 };
 
 module.exports = {
     deductFromOrderNotification,
+    cancelReservedOrderNotification,
     packFromOrderNotification,
     finalizePackedOrderNotification,
     savePlatformOrderItemSkuOverride,
+    listPlatformOrderSkuAdjustments,
     deletePlatformOrderSkuOverrides,
     markRelatedMappingsOutOfSync,
     pushRelatedPlatformStock,
     pushManualOrderPlatformStockDeduction,
     pushManualOrderPlatformStockAdjustment,
+    pushManualOrderPlatformStockIncrease,
 };
-

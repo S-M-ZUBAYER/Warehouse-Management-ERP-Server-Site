@@ -91,6 +91,7 @@ module.exports = {
         { name: 'Inventory', description: 'Inbound draft, On the way and received sku management' },
         { name: 'Platform Order Deductions', description: 'Shopee/TikTok order notification stock deduction APIs' },
         { name: 'Platform Manual Orders', description: 'Platform manual order upload, waybill and stock deduction APIs' },
+        { name: 'Auto Order Accept', description: 'Store-level automatic To Pack order acceptance APIs' },
         // ✅ Just add a new line here for each new module
     ],
 };

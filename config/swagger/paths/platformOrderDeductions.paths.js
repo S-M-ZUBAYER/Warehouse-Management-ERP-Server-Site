@@ -385,5 +385,43 @@ module.exports = {
                 },
             },
         },
+        '/platform-order-deductions/shopee/cancel': {
+            post: {
+                tags: ['Platform Order Deductions'],
+                summary: 'Release reserved stock for a canceled Shopee order item',
+                description: 'Public no-auth/no-rate-limit Shopee cancel callback. Use when a reserved READY_TO_SHIP order is canceled before SHIPPED. Releases ERP reserved stock and calls the same Shopee SKU increase-stock API once.',
+                security: [],
+                requestBody: {
+                    required: true,
+                    content: { 'application/json': { schema: { $ref: '#/components/schemas/ShopeeOrderDeductRequest' } } },
+                },
+                responses: {
+                    200: { description: 'Reserved stock released, already released, or already packed' },
+                    400: { description: 'Missing identifiers' },
+                    404: { description: 'Store or SKU mapping not found' },
+                    409: { description: 'Order item was packed while release was processing' },
+                    502: { description: 'Shopee increase-stock API failed' },
+                },
+            },
+        },
+        '/platform-order-deductions/tiktok/cancel': {
+            post: {
+                tags: ['Platform Order Deductions'],
+                summary: 'Release reserved stock for a canceled TikTok order item',
+                description: 'Public no-auth/no-rate-limit TikTok cancel callback. Use when a reserved AWAITING_SHIPMENT order is canceled before IN_TRANSIT. Releases ERP reserved stock and calls the same TikTok SKU increase-stock API once.',
+                security: [],
+                requestBody: {
+                    required: true,
+                    content: { 'application/json': { schema: { $ref: '#/components/schemas/TikTokOrderDeductRequest' } } },
+                },
+                responses: {
+                    200: { description: 'Reserved stock released, already released, or already packed' },
+                    400: { description: 'Missing identifiers' },
+                    404: { description: 'Store or SKU mapping not found' },
+                    409: { description: 'Order item was packed while release was processing' },
+                    502: { description: 'TikTok increase-stock API failed' },
+                },
+            },
+        },
     },
 };

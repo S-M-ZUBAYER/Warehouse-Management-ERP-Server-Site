@@ -85,7 +85,7 @@ const getDropdowns = async (user) => {
 // 2. getMerchantSkuList — ByMerchantSKUMappingPage table
 // ─────────────────────────────────────────────────────────────────────────────
 const getMerchantSkuList = async (user, filters = {}) => {
-    const { MerchantSku, PlatformSkuMapping, PlatformStore, Warehouse, PlatformProduct } = require('../../models');
+    const { MerchantSku, PlatformSkuMapping, PlatformStore, Warehouse, PlatformProduct, SkuWarehouseStock } = require('../../models');
 
     const {
         page          = 1,
@@ -175,6 +175,35 @@ const getMerchantSkuList = async (user, filters = {}) => {
         subQuery: false,
     });
 
+    const rowSkuIds = rows.map((sku) => sku.id).filter(Boolean);
+    const stockRows = rowSkuIds.length ? await SkuWarehouseStock.findAll({
+        where: await applyWarehouseScope(user, {
+            company_id: user.companyId,
+            merchant_sku_id: { [Op.in]: rowSkuIds },
+        }, 'warehouse_id'),
+        attributes: ['id', 'merchant_sku_id', 'warehouse_id', 'qty_on_hand', 'qty_reserved', 'qty_inbound'],
+        include: [{ model: Warehouse, as: 'warehouse', attributes: ['id', 'name', 'code'], required: false }],
+        order: [['warehouse_id', 'ASC']],
+    }) : [];
+
+    const stockRowsBySkuId = new Map();
+    stockRows.forEach((stock) => {
+        const merchantSkuId = stock.merchant_sku_id;
+        if (!stockRowsBySkuId.has(merchantSkuId)) stockRowsBySkuId.set(merchantSkuId, []);
+        const qtyOnHand = Number(stock.qty_on_hand || 0);
+        const qtyReserved = Number(stock.qty_reserved || 0);
+        stockRowsBySkuId.get(merchantSkuId).push({
+            stock_id: stock.id,
+            warehouse_id: stock.warehouse_id,
+            warehouse_name: stock.warehouse?.name ?? null,
+            warehouse_code: stock.warehouse?.code ?? null,
+            qty_on_hand: qtyOnHand,
+            qty_reserved: qtyReserved,
+            qty_inbound: Number(stock.qty_inbound || 0),
+            available: Math.max(0, qtyOnHand - qtyReserved),
+        });
+    });
+
     const allMappings = rows.flatMap((sku) => sku.platformMappings ?? []);
     const productLookupConditions = allMappings
         .filter((m) => m.platform_store_id && (m.platform_product_id || m.platform_listing_id || m.platform_sku_id))
@@ -235,6 +264,7 @@ const getMerchantSkuList = async (user, filters = {}) => {
                 status:          sku.status,
                 warehouse_id:    responseWarehouseId,
                 warehouse_name:  responseWarehouseName,
+                stock_warehouses: stockRowsBySkuId.get(sku.id) ?? [],
                 is_mapped:       isMapped,
                 mapping_count:   mappings.length,
                 mapped_store_sku:mappedStoreSku,

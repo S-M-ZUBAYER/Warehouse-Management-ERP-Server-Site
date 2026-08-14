@@ -38,7 +38,9 @@ router.use('/order-management', authenticate, require('../modules/packFailedOrde
 router.use('/order-management', authenticate, require('../modules/pushSuccessfulOrders/pushSuccessfulOrders.routes'));
 router.use('/order-management', authenticate, require('../modules/withdrawOrders/withdrawOrders.routes'));
 router.use('/order-management', authenticate, require('../modules/manualOrders/manualOrders.routes'));
+router.use('/auto-order-accept', authenticate, require('../modules/autoOrderAccept/autoOrderAccept.routes'));
 router.use('/platform-manual-orders', authenticate, require('../modules/platformManualOrders/platformManualOrders.routes'));
+router.use('/return-orders', authenticate, requirePageAccess('return_order'), require('../modules/returnOrders/returnOrders.routes'));
 
 // Marketplace order notifications. This route has its own API-key middleware
 // because Shopee/TikTok webhook workers do not use the ERP user JWT flow.

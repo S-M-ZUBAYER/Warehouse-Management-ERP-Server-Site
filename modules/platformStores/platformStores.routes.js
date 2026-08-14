@@ -7,6 +7,26 @@ const { body, query } = require('express-validator');
 const ctrl = require('./platformStores.controller');
 const { authenticate, requireRole } = require('../../middlewares/auth');
 
+const autoOrderAcceptDaysValidator = (field) =>
+    body(field).optional().custom((value) => {
+        const values = Array.isArray(value)
+            ? value
+            : String(value ?? '')
+                .split(',')
+                .map((item) => item.trim())
+                .filter(Boolean);
+        const days = values.map((item) => Number(item));
+
+        if (!days.length) {
+            throw new Error(`${field} must include at least one day`);
+        }
+        if (days.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) {
+            throw new Error(`${field} must contain day numbers from 0 to 6`);
+        }
+
+        return true;
+    });
+
 const createValidator = [
     body('platform').notEmpty().isIn(['shopee', 'tiktok', 'lazada']).withMessage('platform must be shopee, tiktok, or lazada'),
     body('storeName').trim().notEmpty().isLength({ min: 1, max: 255 }),
@@ -17,6 +37,10 @@ const createValidator = [
     body('storeCipher').optional().trim().isLength({ max: 255 }),
     body('region').optional().trim().isLength({ max: 10 }),
     body('defaultWarehouseId').optional().isInt({ min: 1 }),
+    body('autoOrderAccept').optional().isBoolean(),
+    body('auto_order_accept').optional().isBoolean(),
+    autoOrderAcceptDaysValidator('autoOrderAcceptDays'),
+    autoOrderAcceptDaysValidator('auto_order_accept_days'),
     body('webhookSecret').optional().trim().isLength({ max: 255 }),
 ];
 
@@ -34,6 +58,10 @@ const updateValidator = [
     body('region').optional().trim().isLength({ max: 10 }),
     body('defaultWarehouseId').optional().isInt({ min: 1 }),
     body('isActive').optional().isBoolean(),
+    body('autoOrderAccept').optional().isBoolean(),
+    body('auto_order_accept').optional().isBoolean(),
+    autoOrderAcceptDaysValidator('autoOrderAcceptDays'),
+    autoOrderAcceptDaysValidator('auto_order_accept_days'),
     body('webhookSecret').optional().trim(),
 ];
 

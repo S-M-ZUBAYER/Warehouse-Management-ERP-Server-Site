@@ -28,6 +28,8 @@ module.exports = (sequelize) => {
         webhook_secret: { type: DataTypes.STRING(255), allowNull: true },
         default_warehouse_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
         is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+        auto_order_accept: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+        auto_order_accept_days: { type: DataTypes.STRING(50), allowNull: false, defaultValue: '0,1,2,3,4,5,6' },
         created_by: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
     }, {
         tableName: 'platform_stores',
@@ -46,6 +48,7 @@ module.exports = (sequelize) => {
         PlatformStore.belongsTo(models.Company, { foreignKey: 'company_id', as: 'company' });
         PlatformStore.belongsTo(models.Warehouse, { foreignKey: 'default_warehouse_id', as: 'defaultWarehouse' });
         PlatformStore.hasMany(models.PlatformSkuMapping, { foreignKey: 'platform_store_id', as: 'skuMappings' });
+        PlatformStore.hasMany(models.ReturnOrderSyncState, { foreignKey: 'platform_store_id', as: 'returnSyncStates' });
     };
 
     return PlatformStore;

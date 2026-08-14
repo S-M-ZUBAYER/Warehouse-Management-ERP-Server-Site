@@ -10,6 +10,7 @@ const {
     countInventoryValidator,
     setStockAlertValidator,
     syncInventoryValidator,
+    updateInventoryStockValidator,
 } = require('./inventory.validator');
 
 router.use(authenticate);
@@ -48,6 +49,14 @@ router.put(
     '/sync',
     syncInventoryValidator,
     ctrl.syncInventory
+);
+
+// PUT /api/v1/inventory/:id/stock
+// Edit quantity and lock quantity for one inventory row
+router.put(
+    '/:id/stock',
+    updateInventoryStockValidator,
+    ctrl.updateInventoryStock
 );
 
 module.exports = router;

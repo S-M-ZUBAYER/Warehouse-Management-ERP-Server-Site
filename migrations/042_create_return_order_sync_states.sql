@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS return_order_sync_states (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    company_id INT UNSIGNED NOT NULL,
+    platform ENUM('shopee','tiktok') NOT NULL,
+    platform_store_id INT UNSIGNED NOT NULL,
+    last_synced_page INT UNSIGNED NULL,
+    previous_last_page INT UNSIGNED NULL,
+    first_requested_page INT UNSIGNED NULL,
+    fetched_rows INT UNSIGNED NOT NULL DEFAULT 0,
+    last_sync_at DATETIME NULL,
+    metadata_json JSON NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_return_sync_state_store (company_id, platform, platform_store_id),
+    KEY idx_return_sync_state_company_platform (company_id, platform),
+    KEY idx_return_sync_state_store (platform_store_id),
+    KEY idx_return_sync_state_last_sync (company_id, platform, last_sync_at),
+    CONSTRAINT fk_return_sync_state_company FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    CONSTRAINT fk_return_sync_state_store FOREIGN KEY (platform_store_id) REFERENCES platform_stores(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

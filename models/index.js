@@ -40,6 +40,9 @@ const ManualOrderStatusHistory = require('./ManualOrderStatusHistory')(sequelize
 const PlatformOrderItemSkuOverride = require('./PlatformOrderItemSkuOverride')(sequelize);       // NEW
 const PlatformManualOrder = require('./PlatformManualOrder')(sequelize);       // NEW
 const PlatformManualOrderItem = require('./PlatformManualOrderItem')(sequelize);       // NEW
+const ReturnOrder = require('./ReturnOrder')(sequelize);
+const ReturnOrderLine = require('./ReturnOrderLine')(sequelize);
+const ReturnOrderSyncState = require('./ReturnOrderSyncState')(sequelize);
 
 // ── MerchantSku Sync integration ──────────────────────────────────────────────────────
 const MerchantSkuSyncGroup=require('./MerchantSkuSyncGroup')(sequelize);   //New
@@ -106,6 +109,9 @@ const models = {
     PlatformOrderItemSkuOverride,
     PlatformManualOrder,
     PlatformManualOrderItem,
+    ReturnOrder,
+    ReturnOrderLine,
+    ReturnOrderSyncState,
     MerchantSkuSyncGroup,
     MerchantSkuSyncMember
     // Add here as you uncomment above

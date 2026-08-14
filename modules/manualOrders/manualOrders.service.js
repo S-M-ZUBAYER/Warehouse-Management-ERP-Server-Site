@@ -146,6 +146,8 @@ const EASY_PARCEL_SUPPORTED_COUNTRIES = {
     SG: { code: "SG", name: "Singapore", currency: "SGD", phoneCode: "SG", defaultSubdivision: "SG-01" },
     TH: { code: "TH", name: "Thailand", currency: "THB", phoneCode: "TH", defaultSubdivision: "" },
     ID: { code: "ID", name: "Indonesia", currency: "IDR", phoneCode: "ID", defaultSubdivision: "" },
+    PH: { code: "PH", name: "Philippines", currency: "PHP", phoneCode: "PH", defaultSubdivision: "" },
+    VN: { code: "VN", name: "Vietnam", currency: "VND", phoneCode: "VN", defaultSubdivision: "" },
 };
 
 const AFTERSHIP_SUPPORTED_COUNTRIES = {
@@ -161,6 +163,7 @@ const MANUAL_ORDER_STATUSES = {
     CREATED: "CREATED",
     BOOKING_PENDING: "BOOKING_PENDING",
     BOOKING_FAILED: "BOOKING_FAILED",
+    MANUAL_DELIVERY: "MANUAL_DELIVERY",
     SCHEDULE_IN_ARRANGEMENT: "SCHEDULE_IN_ARRANGEMENT",
     TO_BE_COLLECTED: "TO_BE_COLLECTED",
     DROP_OFF: "DROP_OFF",
@@ -242,6 +245,7 @@ const statusLabel = (status) => {
         CREATED: "Created",
         BOOKING_PENDING: "Booking Pending",
         BOOKING_FAILED: "Booking Failed",
+        MANUAL_DELIVERY: "Self-arranged Delivery",
         SCHEDULE_IN_ARRANGEMENT: "Schedule In Arrangement",
         TO_BE_COLLECTED: "To Be Collected",
         DROP_OFF: "Drop Off",
@@ -293,6 +297,7 @@ const getManualOrderStatusOptions = () => [
     { value: MANUAL_ORDER_STATUSES.CREATED, label: "Created", group: "Order" },
     { value: MANUAL_ORDER_STATUSES.BOOKING_PENDING, label: "Booking Pending", group: "Order" },
     { value: MANUAL_ORDER_STATUSES.BOOKING_FAILED, label: "Booking Failed", group: "Order" },
+    { value: MANUAL_ORDER_STATUSES.MANUAL_DELIVERY, label: "Self-arranged Delivery", group: "Order" },
     { value: MANUAL_ORDER_STATUSES.SCHEDULE_IN_ARRANGEMENT, label: "Schedule In Arrangement", group: "Pending AWB" },
     { value: MANUAL_ORDER_STATUSES.TO_BE_COLLECTED, label: "To Be Collected", group: "On Going" },
     { value: MANUAL_ORDER_STATUSES.DROP_OFF, label: "Drop Off", group: "On Going" },
@@ -1280,7 +1285,7 @@ const buildSubmitOrderPayload = ({ config, warehouse = {}, body = {}, orderNumbe
     if (!receiver.phone) missing.push("receiver phone");
     if (!receiver.address) missing.push("receiver address");
     if (!receiver.postcode) missing.push("receiver postcode");
-    if (!EASY_PARCEL_SUPPORTED_COUNTRIES[senderCountry] || !EASY_PARCEL_SUPPORTED_COUNTRIES[receiverCountry]) missing.push("supported country MY/SG/TH/ID");
+    if (!EASY_PARCEL_SUPPORTED_COUNTRIES[senderCountry] || !EASY_PARCEL_SUPPORTED_COUNTRIES[receiverCountry]) missing.push("supported country MY/SG/TH/ID/PH/VN");
     if (senderCountry !== receiverCountry) missing.push("same sender and receiver country");
     if (senderCountry === "MY" && !sender.state) missing.push("sender state");
     if (receiverCountry === "MY" && !receiver.state) missing.push("receiver state");
@@ -1486,6 +1491,51 @@ const saveManualPaymentCertificate = async ({ certificate, orderNumber }) => {
         return { url: `/uploads/manual-payment-certificates/${filename}`, filename, stored: true };
     } catch (err) {
         console.warn("Manual order payment certificate could not be stored", err.message);
+        return { url: "", filename, stored: false };
+    }
+};
+
+const saveManualWaybillFile = async ({ file, orderNumber }) => {
+    if (!file) return { url: "", filename: "", stored: false };
+    if (typeof file === "string" && /^https?:\/\//i.test(file)) {
+        return { url: file, filename: path.basename(file), stored: false };
+    }
+    if (typeof file === "string" && file.startsWith("/uploads/")) {
+        return { url: file, filename: path.basename(file), stored: false };
+    }
+
+    const dataUrl = typeof file === "string" ? file : file.dataUrl || file.base64 || "";
+    if (!dataUrl) return { url: "", filename: "", stored: false };
+
+    const match = String(dataUrl).match(/^data:([^;]+);base64,(.+)$/);
+    const mimeType = normalizeString(file.mimeType || file.type || (match ? match[1] : "application/pdf"));
+    const base64Body = match ? match[2] : String(dataUrl);
+    let buffer;
+    try {
+        buffer = Buffer.from(base64Body, "base64");
+    } catch (err) {
+        console.warn("Manual delivery waybill could not be decoded", err.message);
+        return { url: "", filename: "", stored: false };
+    }
+    if (!buffer.length) return { url: "", filename: "", stored: false };
+    if (!mimeType.includes("pdf")) {
+        const err = new Error("Waybill upload must be a PDF file.");
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const originalName = normalizeString(file.name || file.filename || "");
+    const filename = `${orderNumber || "manual-order"}-${originalName || "waybill.pdf"}`.replace(/[^A-Za-z0-9_.-]/g, "_");
+    const uploadRoot = path.resolve(process.env.UPLOAD_PATH || "./uploads");
+    const dir = path.join(uploadRoot, "manual-waybills");
+    const target = path.join(dir, filename);
+
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(target, buffer);
+        return { url: `/uploads/manual-waybills/${filename}`, filename, stored: true };
+    } catch (err) {
+        console.warn("Manual delivery waybill could not be stored", err.message);
         return { url: "", filename, stored: false };
     }
 };
@@ -2079,15 +2129,13 @@ const cancelEasyParcelShipment = async ({ config, shipmentNumber, remark = "Canc
     return parsed;
 };
 
-const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, type }) => {
-    const { ManualOrder } = require("../../models");
+const prepareEasyParcelBooking = async ({ warehouse, body, orderNumber, type, existingOrder = null, existingRaw = {} }) => {
     const easyParcel = body.easyParcel || {};
     const sender = getWarehouseSender(warehouse, easyParcel.sender || body.sender || {});
     const receiver = getBuyerReceiver({ ...(body.buyer || {}), email: easyParcel.receiverEmail || body?.buyer?.email }, sender.country);
     const config = getEasyParcelConfig(sender.country);
     const selectedRate = easyParcel.selectedRate || body.logisticRaw || body.logistic_raw || {};
     const serviceId = normalizeString(body.logisticServiceId || body.logistic_service_id || selectedRate.serviceId || selectedRate.service_id);
-    const isCancelledRebook = normalizeManualStatus(createdOrder?.status) === MANUAL_ORDER_STATUSES.CANCELLED;
 
     if (!easyParcel.bookNow) return null;
     if (!serviceId) {
@@ -2096,7 +2144,6 @@ const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, typ
         throw err;
     }
 
-    const existingRaw = getOrderLogisticRaw(createdOrder);
     const bookingResult = {
         originCountry: config.country,
         currency: config.currency,
@@ -2109,6 +2156,111 @@ const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, typ
         openApi: true,
     };
 
+    const submitPayload = buildSubmitOrderPayload({ config, warehouse, body, orderNumber, type });
+    const submitResponse = await callEasyParcelOpenApi(config, {
+        method: "POST",
+        path: config.submitPath,
+        fallbackPaths: [`/open_api/${config.openApiVersion}/shipment/submit_orders`],
+        data: submitPayload,
+    });
+    const submit = parseSubmitResult(submitResponse);
+    if (!submit.orderNumber && !submit.shipmentNumber && !submit.awb && !submit.awbLink) {
+        const err = new Error(submit.remarks || "EasyParcel shipment was not created.");
+        err.easyParcelResponse = submitResponse;
+        throw err;
+    }
+
+    Object.assign(bookingResult, {
+        submitted: true,
+        paid: Boolean(submit.awb || submit.awbLink || submit.price > 0),
+        orderNumber: submit.orderNumber,
+        shipmentNumber: submit.shipmentNumber,
+        parcelNumber: submit.parcelNumber,
+        awb: submit.awb,
+        awbLink: submit.awbLink,
+        trackingUrl: submit.trackingUrl,
+        price: submit.price || selectedRate.price || 0,
+        courier: submit.courier || selectedRate.company || selectedRate.serviceName || "EasyParcel",
+        submitResponse,
+    });
+
+    const savedWaybill = await saveWaybillPdfFromUrl({ url: bookingResult.awbLink, orderNumber });
+    if (savedWaybill.url) {
+        bookingResult.awbLink = savedWaybill.url;
+        bookingResult.pdfFilename = savedWaybill.filename;
+        bookingResult.sourceAwbLink = savedWaybill.sourceUrl || bookingResult.awbLink;
+        bookingResult.waybillStoredLocally = savedWaybill.stored;
+    }
+
+    const nextStatus = inferEasyParcelStatusFromSubmit(submit);
+    const paymentType = normalizeManualOrderPaymentType(body.payment || {});
+    const codAmount = paymentType === "COD"
+        ? Math.max(1, moneyNumber(body.payment?.codAmount || easyParcel.parcelValue || body.payment?.orderValue || body.payment?.subtotal || 0))
+        : 0;
+    const packageData = resolvePackageDimensions(body);
+    const logisticRaw = buildManualOrderLogisticRaw({
+        existing: existingRaw,
+        selectedRate,
+        sender,
+        receiver,
+        payment: body.payment || {},
+        packageData,
+        content: easyParcel.content || existingOrder?.package_content || "Product",
+        easyParcel: bookingResult,
+    });
+
+    const isCancelledRebook = normalizeManualStatus(existingOrder?.status) === MANUAL_ORDER_STATUSES.CANCELLED;
+    const updatePatch = {
+        booking_status: "BOOKED",
+        status: nextStatus,
+        shipment_status: nextStatus,
+        cod_status: paymentType === "COD" ? COD_STATUSES.PENDING_COLLECTION : COD_STATUSES.NOT_APPLICABLE,
+        logistic_service_id: serviceId,
+        logistic_company: bookingResult.courier || selectedRate.company || existingOrder?.logistic_company || "",
+        logistic_raw: logisticRaw,
+        tracking_number: bookingResult.awb || bookingResult.shipmentNumber || bookingResult.parcelNumber || (isCancelledRebook ? null : existingOrder?.tracking_number || null),
+        awb_number: bookingResult.awb || (isCancelledRebook ? null : existingOrder?.awb_number || null),
+        provider_order_number: bookingResult.orderNumber || (isCancelledRebook ? null : existingOrder?.provider_order_number || null),
+        provider_shipment_number: bookingResult.shipmentNumber || (isCancelledRebook ? null : existingOrder?.provider_shipment_number || null),
+        parcel_number: bookingResult.parcelNumber || (isCancelledRebook ? null : existingOrder?.parcel_number || null),
+        waybill_pdf_url: bookingResult.awbLink || (isCancelledRebook ? null : existingOrder?.waybill_pdf_url || null),
+        waybill_pdf_filename: bookingResult.pdfFilename || (isCancelledRebook ? null : manualWaybillFilename(orderNumber)),
+        tracking_url: bookingResult.trackingUrl || (isCancelledRebook ? null : existingOrder?.tracking_url || null),
+        raw_provider_status: submit.status || nextStatus,
+        easyparcel_country: config.country,
+        shipping_fee: bookingResult.price || selectedRate.price || existingOrder?.shipping_fee || 0,
+        cod_amount: codAmount,
+        booking_error: null,
+        last_status_checked_at: new Date(),
+    };
+
+    return { bookingResult, updatePatch, nextStatus, submit, selectedRate, sender, receiver, config };
+};
+
+const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, type }) => {
+    const { ManualOrder } = require("../../models");
+    const easyParcel = body.easyParcel || {};
+    const sender = getWarehouseSender(warehouse, easyParcel.sender || body.sender || {});
+    const receiver = getBuyerReceiver({ ...(body.buyer || {}), email: easyParcel.receiverEmail || body?.buyer?.email }, sender.country);
+    const config = getEasyParcelConfig(sender.country);
+    const selectedRate = easyParcel.selectedRate || body.logisticRaw || body.logistic_raw || {};
+    const serviceId = normalizeString(body.logisticServiceId || body.logistic_service_id || selectedRate.serviceId || selectedRate.service_id);
+    const existingRaw = getOrderLogisticRaw(createdOrder);
+    const isCancelledRebook = normalizeManualStatus(createdOrder?.status) === MANUAL_ORDER_STATUSES.CANCELLED;
+    const bookingResult = {
+        originCountry: config.country,
+        currency: config.currency,
+        mode: config.mode,
+        serviceId,
+        selectedRate,
+        submitted: false,
+        paid: false,
+        submitNow: true,
+        openApi: true,
+    };
+
+    if (!easyParcel.bookNow) return null;
+
     await updateManualOrderLogisticsStatus({
         user,
         order: createdOrder,
@@ -2118,82 +2270,15 @@ const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, typ
     });
 
     try {
-        const submitPayload = buildSubmitOrderPayload({ config, warehouse, body, orderNumber: createdOrder.order_number, type });
-        const submitResponse = await callEasyParcelOpenApi(config, {
-            method: "POST",
-            path: config.submitPath,
-            fallbackPaths: [`/open_api/${config.openApiVersion}/shipment/submit_orders`],
-            data: submitPayload,
+        const prepared = await prepareEasyParcelBooking({
+            warehouse,
+            body,
+            orderNumber: createdOrder.order_number,
+            type,
+            existingOrder: createdOrder,
+            existingRaw,
         });
-        const submit = parseSubmitResult(submitResponse);
-        if (!submit.orderNumber && !submit.shipmentNumber && !submit.awb && !submit.awbLink) {
-            const err = new Error(submit.remarks || "EasyParcel shipment was not created.");
-            err.easyParcelResponse = submitResponse;
-            throw err;
-        }
-
-        Object.assign(bookingResult, {
-            submitted: true,
-            paid: Boolean(submit.awb || submit.awbLink || submit.price > 0),
-            orderNumber: submit.orderNumber,
-            shipmentNumber: submit.shipmentNumber,
-            parcelNumber: submit.parcelNumber,
-            awb: submit.awb,
-            awbLink: submit.awbLink,
-            trackingUrl: submit.trackingUrl,
-            price: submit.price || selectedRate.price || 0,
-            courier: submit.courier || selectedRate.company || selectedRate.serviceName || "EasyParcel",
-            submitResponse,
-        });
-
-        const savedWaybill = await saveWaybillPdfFromUrl({ url: bookingResult.awbLink, orderNumber: createdOrder.order_number });
-        if (savedWaybill.url) {
-            bookingResult.awbLink = savedWaybill.url;
-            bookingResult.pdfFilename = savedWaybill.filename;
-            bookingResult.sourceAwbLink = savedWaybill.sourceUrl || bookingResult.awbLink;
-            bookingResult.waybillStoredLocally = savedWaybill.stored;
-        }
-
-        const nextStatus = inferEasyParcelStatusFromSubmit(submit);
-        const paymentType = normalizeManualOrderPaymentType(body.payment || {});
-        const codAmount = paymentType === "COD"
-            ? Math.max(1, moneyNumber(body.payment?.codAmount || easyParcel.parcelValue || body.payment?.orderValue || body.payment?.subtotal || 0))
-            : 0;
-        const packageData = resolvePackageDimensions(body);
-        const logisticRaw = buildManualOrderLogisticRaw({
-            existing: existingRaw,
-            selectedRate,
-            sender,
-            receiver,
-            payment: body.payment || {},
-            packageData,
-            content: easyParcel.content || createdOrder.package_content || "Product",
-            easyParcel: bookingResult,
-        });
-
-        const updatePatch = {
-            booking_status: "BOOKED",
-            status: nextStatus,
-            shipment_status: nextStatus,
-            cod_status: paymentType === "COD" ? COD_STATUSES.PENDING_COLLECTION : COD_STATUSES.NOT_APPLICABLE,
-            logistic_service_id: serviceId,
-            logistic_company: bookingResult.courier || selectedRate.company || createdOrder.logistic_company,
-            logistic_raw: logisticRaw,
-            tracking_number: bookingResult.awb || bookingResult.shipmentNumber || bookingResult.parcelNumber || (isCancelledRebook ? null : createdOrder.tracking_number),
-            awb_number: bookingResult.awb || (isCancelledRebook ? null : createdOrder.awb_number),
-            provider_order_number: bookingResult.orderNumber || (isCancelledRebook ? null : createdOrder.provider_order_number),
-            provider_shipment_number: bookingResult.shipmentNumber || (isCancelledRebook ? null : createdOrder.provider_shipment_number),
-            parcel_number: bookingResult.parcelNumber || (isCancelledRebook ? null : createdOrder.parcel_number),
-            waybill_pdf_url: bookingResult.awbLink || (isCancelledRebook ? null : createdOrder.waybill_pdf_url),
-            waybill_pdf_filename: bookingResult.pdfFilename || (isCancelledRebook ? null : manualWaybillFilename(createdOrder.order_number)),
-            tracking_url: bookingResult.trackingUrl || (isCancelledRebook ? null : createdOrder.tracking_url),
-            raw_provider_status: submit.status || nextStatus,
-            easyparcel_country: config.country,
-            shipping_fee: bookingResult.price || selectedRate.price || createdOrder.shipping_fee,
-            cod_amount: codAmount,
-            booking_error: null,
-            last_status_checked_at: new Date(),
-        };
+        const { bookingResult, updatePatch, nextStatus, submit } = prepared;
 
         await ManualOrder.update(updatePatch, { where: { id: createdOrder.id, company_id: user.companyId } });
         await createManualStatusHistory({
@@ -2822,6 +2907,8 @@ const toManualOrderApi = (order) => {
         codStatus: plain.cod_status || COD_STATUSES.NOT_APPLICABLE,
         bookingStatus: plain.booking_status || "SAVED_ONLY",
         bookingError: plain.booking_error || easyParcel?.error || afterShip?.error || "",
+        manualDelivery: Boolean(logisticRaw.manualDelivery || easyParcel?.manualDelivery || plain.booking_status === "MANUAL_DELIVERY" || rawStatus === MANUAL_ORDER_STATUSES.MANUAL_DELIVERY),
+        manualDeliveryInfo: logisticRaw.manualDelivery || null,
         rawProviderStatus: plain.raw_provider_status || "",
         logisticCompany: plain.logistic_company || easyParcel?.courier || afterShip?.courier || "",
         logisticServiceId: plain.logistic_service_id || easyParcel?.serviceId || afterShip?.serviceType || afterShip?.serviceId || "",
@@ -3167,7 +3254,8 @@ const createManualOrder = async (user, body) => {
     const afterShip = body.afterShip || body.aftership || {};
     const selectedRate = afterShip.selectedRate || easyParcel.selectedRate || body.logisticRaw || body.logistic_raw || {};
     const afterShipBookNow = normalizeBool(afterShip.bookNow ?? afterShip.submitNow ?? afterShip.createLabel ?? body.afterShipBookNow, false);
-    const easyParcelBookNow = !afterShipBookNow && normalizeBool(easyParcel.bookNow, false);
+    const manualDeliveryRequested = !afterShipBookNow && normalizeBool(easyParcel.manualDelivery ?? easyParcel.selfArranged ?? body.manualDelivery, false);
+    const easyParcelBookNow = !afterShipBookNow && !manualDeliveryRequested && normalizeBool(easyParcel.bookNow, false);
     const bookingRequested = afterShipBookNow || easyParcelBookNow;
 
     if (!Number.isInteger(warehouseId) || warehouseId <= 0) {
@@ -3208,6 +3296,33 @@ const createManualOrder = async (user, body) => {
         certificate: body.paymentCertificate || payment.paymentCertificate || payment.payment_certificate,
         orderNumber,
     });
+    let easyParcelPreBooking = null;
+    if (easyParcelBookNow) {
+        try {
+            easyParcelPreBooking = await prepareEasyParcelBooking({
+                warehouse: warehouse.toJSON ? warehouse.toJSON() : warehouse,
+                body: {
+                    ...body,
+                    easyParcel: {
+                        ...easyParcel,
+                        bookNow: true,
+                        sender,
+                        receiverEmail: receiver.email,
+                        selectedRate,
+                        content: packageContent,
+                        parcelValue: Math.max(1, moneyNumber(codAmount || payment.orderValue || payment.subtotal || 1)),
+                    },
+                },
+                orderNumber,
+                type,
+            });
+        } catch (err) {
+            const wrapped = new Error(`Shipment booking failed: ${err.message || "EasyParcel booking failed"}`);
+            wrapped.statusCode = err.statusCode || 502;
+            wrapped.easyParcelResponse = err.easyParcelResponse || null;
+            throw wrapped;
+        }
+    }
     const createdItems = [];
     const affectedMerchantSkuIds = [];
     const platformStockDeductionItems = [];
@@ -3221,7 +3336,17 @@ const createManualOrder = async (user, body) => {
             payment: { ...payment, paymentType, codAmount, paymentCertificate },
             packageData,
             content: packageContent,
-            easyParcel: easyParcelBookNow ? { requested: true, openApi: true } : null,
+            easyParcel: easyParcelPreBooking
+                ? easyParcelPreBooking.bookingResult
+                : manualDeliveryRequested
+                    ? {
+                        manualDelivery: true,
+                        selfArranged: true,
+                        reason: "No courier service found for this route",
+                    }
+                    : easyParcelBookNow
+                        ? { requested: true, openApi: true }
+                        : null,
             afterShip: afterShipBookNow ? {
                 requested: true,
                 api: "aftership-shipping",
@@ -3238,10 +3363,22 @@ const createManualOrder = async (user, body) => {
             warehouse_id: warehouseId,
             order_number: orderNumber,
             type,
-            status: bookingRequested ? MANUAL_ORDER_STATUSES.BOOKING_PENDING : MANUAL_ORDER_STATUSES.CREATED,
-            shipment_status: bookingRequested ? MANUAL_ORDER_STATUSES.BOOKING_PENDING : MANUAL_ORDER_STATUSES.CREATED,
+            status: manualDeliveryRequested
+                ? MANUAL_ORDER_STATUSES.MANUAL_DELIVERY
+                : easyParcelPreBooking
+                    ? easyParcelPreBooking.updatePatch.status
+                    : bookingRequested
+                        ? MANUAL_ORDER_STATUSES.BOOKING_PENDING
+                        : MANUAL_ORDER_STATUSES.CREATED,
+            shipment_status: manualDeliveryRequested
+                ? MANUAL_ORDER_STATUSES.MANUAL_DELIVERY
+                : easyParcelPreBooking
+                    ? easyParcelPreBooking.updatePatch.shipment_status
+                    : bookingRequested
+                        ? MANUAL_ORDER_STATUSES.BOOKING_PENDING
+                        : MANUAL_ORDER_STATUSES.CREATED,
             cod_status: isCod ? COD_STATUSES.PENDING_COLLECTION : COD_STATUSES.NOT_APPLICABLE,
-            booking_status: bookingRequested ? "BOOKING_PENDING" : "SAVED_ONLY",
+            booking_status: manualDeliveryRequested ? "MANUAL_DELIVERY" : easyParcelPreBooking ? "BOOKED" : bookingRequested ? "BOOKING_PENDING" : "SAVED_ONLY",
             logistic_service_id: normalizeString(body.logisticServiceId || body.logistic_service_id || selectedRate.serviceType || selectedRate.service_type || selectedRate.serviceId || selectedRate.service_id),
             logistic_company: normalizeString(body.logisticCompany || body.logistic || body.logistic_company || selectedRate.company || selectedRate.courier_name),
             logistic_raw: logisticRaw,
@@ -3284,6 +3421,29 @@ const createManualOrder = async (user, body) => {
             package_width: packageData.width,
             package_height: packageData.height,
             package_content: packageContent,
+            ...(easyParcelPreBooking?.updatePatch ? {
+                status: easyParcelPreBooking.updatePatch.status,
+                shipment_status: easyParcelPreBooking.updatePatch.shipment_status,
+                cod_status: easyParcelPreBooking.updatePatch.cod_status,
+                booking_status: easyParcelPreBooking.updatePatch.booking_status,
+                logistic_service_id: easyParcelPreBooking.updatePatch.logistic_service_id,
+                logistic_company: easyParcelPreBooking.updatePatch.logistic_company,
+                logistic_raw: easyParcelPreBooking.updatePatch.logistic_raw,
+                tracking_number: easyParcelPreBooking.updatePatch.tracking_number,
+                awb_number: easyParcelPreBooking.updatePatch.awb_number,
+                provider_order_number: easyParcelPreBooking.updatePatch.provider_order_number,
+                provider_shipment_number: easyParcelPreBooking.updatePatch.provider_shipment_number,
+                parcel_number: easyParcelPreBooking.updatePatch.parcel_number,
+                waybill_pdf_url: easyParcelPreBooking.updatePatch.waybill_pdf_url,
+                waybill_pdf_filename: easyParcelPreBooking.updatePatch.waybill_pdf_filename,
+                tracking_url: easyParcelPreBooking.updatePatch.tracking_url,
+                raw_provider_status: easyParcelPreBooking.updatePatch.raw_provider_status,
+                easyparcel_country: easyParcelPreBooking.updatePatch.easyparcel_country,
+                shipping_fee: easyParcelPreBooking.updatePatch.shipping_fee,
+                cod_amount: easyParcelPreBooking.updatePatch.cod_amount,
+                booking_error: easyParcelPreBooking.updatePatch.booking_error,
+                last_status_checked_at: easyParcelPreBooking.updatePatch.last_status_checked_at,
+            } : {}),
             created_by: user.userId || user.id || null,
         }, { transaction });
 
@@ -3295,9 +3455,13 @@ const createManualOrder = async (user, body) => {
             rawProviderStatus: "",
             note: afterShipBookNow
                 ? "Manual order saved; AfterShip label requested"
-                : easyParcelBookNow
-                    ? "Manual order saved; EasyParcel booking requested"
-                    : "Manual order saved only",
+                : easyParcelPreBooking
+                    ? "Manual order saved after shipment booking completed"
+                    : manualDeliveryRequested
+                        ? "Manual order saved for self-arranged delivery"
+                        : easyParcelBookNow
+                            ? "Manual order saved; EasyParcel booking requested"
+                            : "Manual order saved only",
             transaction,
         });
 
@@ -3426,6 +3590,8 @@ const createManualOrder = async (user, body) => {
         } catch (err) {
             afterShipError = err.message || "AfterShip booking failed";
         }
+    } else if (easyParcelPreBooking) {
+        easyParcelBooking = easyParcelPreBooking.bookingResult;
     } else if (easyParcelBookNow) {
         try {
             easyParcelBooking = await bookEasyParcelShipment({ user, warehouse: warehouse.toJSON ? warehouse.toJSON() : warehouse, body, createdOrder, type });
@@ -3445,7 +3611,9 @@ const createManualOrder = async (user, body) => {
                 : afterShipBooking
                     ? `${type === "gift" ? "Gift" : "Manual"} order created and AfterShip label generated successfully`
                     : easyParcelBooking
-                        ? `${type === "gift" ? "Gift" : "Manual"} order created and EasyParcel shipment booked successfully`
+                        ? `${type === "gift" ? "Gift" : "Manual"} order created and shipment booked successfully`
+                        : manualDeliveryRequested
+                            ? `${type === "gift" ? "Gift" : "Manual"} order created for self-arranged delivery`
                 : `${type === "gift" ? "Gift" : "Manual"} order saved successfully`,
         order: apiOrder,
         easyParcel: easyParcelBooking || apiOrder.easyParcel,
@@ -3500,6 +3668,76 @@ const submitManualOrderToEasyParcel = async (user, id) => {
         waybillPdfUrl: apiOrder.waybillPdfUrl,
         waybillPdfFilename: apiOrder.waybillPdfFilename,
         easyParcelError,
+    };
+};
+
+const updateManualOrderDeliveryInfo = async (user, id, body = {}) => {
+    const { ManualOrder } = require("../../models");
+    const order = await findManualOrderForUser(user, id, { includeHistory: true });
+    const rawStatus = normalizeManualStatus(order.status);
+    const raw = getOrderLogisticRaw(order);
+    const isManualDelivery = rawStatus === MANUAL_ORDER_STATUSES.MANUAL_DELIVERY || order.booking_status === "MANUAL_DELIVERY" || raw.manualDelivery;
+
+    if (!isManualDelivery) {
+        const err = new Error("Delivery information can only be updated for self-arranged manual delivery orders.");
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const logisticCompany = normalizeString(body.logisticCompany || body.logistic_company || body.courier || body.courierName);
+    const trackingNumber = normalizeString(body.trackingNumber || body.tracking_number || body.awbNumber || body.awb_number);
+    const uploadedWaybill = await saveManualWaybillFile({
+        file: body.waybillFile || body.waybill_file || body.waybillPdfFile || body.waybill_pdf_file,
+        orderNumber: order.order_number,
+    });
+    const waybillUrl = uploadedWaybill.url || normalizeString(body.waybillUrl || body.waybill_pdf_url || body.waybillPdfUrl || body.awbLink);
+    const note = normalizeString(body.note || body.remark || "");
+    const manualDelivery = {
+        ...(raw.manualDelivery && typeof raw.manualDelivery === "object" ? raw.manualDelivery : {}),
+        manualDelivery: true,
+        selfArranged: true,
+        logisticCompany,
+        trackingNumber,
+        waybillUrl,
+        waybillFilename: uploadedWaybill.filename || "",
+        note,
+        updatedAt: new Date().toISOString(),
+    };
+    const logisticRaw = {
+        ...raw,
+        manualDelivery,
+        easyParcel: {
+            ...(raw.easyParcel && typeof raw.easyParcel === "object" ? raw.easyParcel : {}),
+            manualDelivery: true,
+            selfArranged: true,
+        },
+    };
+
+    await ManualOrder.update({
+        logistic_company: logisticCompany || order.logistic_company,
+        tracking_number: trackingNumber || order.tracking_number,
+        awb_number: trackingNumber || order.awb_number,
+        waybill_pdf_url: waybillUrl || order.waybill_pdf_url,
+        waybill_pdf_filename: uploadedWaybill.filename || (waybillUrl ? path.basename(waybillUrl.split("?")[0]) || order.waybill_pdf_filename : order.waybill_pdf_filename),
+        logistic_raw: logisticRaw,
+        booking_status: "MANUAL_DELIVERY",
+        booking_error: null,
+        last_status_checked_at: new Date(),
+    }, { where: { id: order.id, company_id: user.companyId } });
+
+    await createManualStatusHistory({
+        user,
+        order,
+        oldStatus: order.status,
+        newStatus: MANUAL_ORDER_STATUSES.MANUAL_DELIVERY,
+        rawProviderStatus: "MANUAL_DELIVERY",
+        note: note || "Self-arranged delivery information updated",
+    });
+
+    const updatedOrder = await findManualOrderForUser(user, order.id, { includeHistory: true });
+    return {
+        message: "Delivery information updated successfully",
+        order: toManualOrderApi(updatedOrder),
     };
 };
 
@@ -4362,6 +4600,7 @@ module.exports = {
     cancelManualOrderAfterShip,
     createManualOrderAfterShipPickup,
     updateManualOrderCodSettlement,
+    updateManualOrderDeliveryInfo,
     finalizePackedPlatformOrder,
     changePlatformOrderSku,
 };

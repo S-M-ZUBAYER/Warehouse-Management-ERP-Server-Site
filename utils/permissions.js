@@ -35,6 +35,7 @@ const permissionPathMap = {
   completed_order: ['order_management', 'order_processing', 'completed_order'],
   all_order: ['order_management', 'order_processing', 'all_order'],
   canceled_order: ['order_management', 'order_processing', 'canceled_order'],
+  return_order: ['order_management', 'order_processing', 'return_order'],
   manual_order: ['order_management', 'manual_order'],
   warehouse_management: ['warehouse_management'],
   store_authorization: ['system_configuration', 'store_authorization'],

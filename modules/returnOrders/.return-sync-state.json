@@ -1,0 +1,19 @@
+{
+  "shopee": {
+    "companies": {
+      "1": {
+        "stores": {
+          "68": {
+            "lastSyncedPage": 26,
+            "previousLastPage": 0,
+            "firstRequestedPage": 1,
+            "fetchedRows": 1294,
+            "more": false,
+            "updatedAt": "2026-08-10T08:37:08.002Z"
+          }
+        },
+        "lastSyncAt": "2026-08-10T08:37:08.002Z"
+      }
+    }
+  }
+}

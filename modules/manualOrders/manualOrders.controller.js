@@ -252,6 +252,16 @@ const updateManualOrderCodSettlement = async (req, res, next) => {
     }
 };
 
+const updateManualOrderDeliveryInfo = async (req, res, next) => {
+    try {
+        if (!handleValidation(req, res)) return;
+        const data = await service.updateManualOrderDeliveryInfo(req.user, req.params.id, req.body || {});
+        return res.json({ status: true, data, message: data.message });
+    } catch (err) {
+        next(err);
+    }
+};
+
 const createManualOrder = async (req, res, next) => {
     try {
         if (!handleValidation(req, res)) return;
@@ -310,6 +320,7 @@ module.exports = {
     cancelManualOrderAfterShip,
     createManualOrderAfterShipPickup,
     updateManualOrderCodSettlement,
+    updateManualOrderDeliveryInfo,
     changePlatformOrderSku,
     finalizePackedPlatformOrder,
 };

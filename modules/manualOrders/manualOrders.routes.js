@@ -6,7 +6,7 @@ const ctrl = require('./manualOrders.controller');
 
 const router = express.Router();
 const afterShipCountries = ['PH', 'VN', 'TH', 'ID', 'MY', 'SG'];
-const easyParcelCountries = ['MY', 'SG', 'TH', 'ID'];
+const easyParcelCountries = ['MY', 'SG', 'TH', 'ID', 'PH', 'VN'];
 
 router.get('/manual-orders/dropdowns', ctrl.getDropdowns);
 router.get('/manual-orders/sku-search', [
@@ -143,6 +143,17 @@ router.patch('/manual-orders/:id/cod-settlement', [
     body('reference').optional().isString(),
     body('note').optional().isString(),
 ], ctrl.updateManualOrderCodSettlement);
+router.patch('/manual-orders/:id/manual-delivery', [
+    body('logisticCompany').optional().isString(),
+    body('logistic_company').optional().isString(),
+    body('trackingNumber').optional().isString(),
+    body('tracking_number').optional().isString(),
+    body('waybillUrl').optional().isString(),
+    body('waybillPdfUrl').optional().isString(),
+    body('waybillFile').optional(),
+    body('waybill_file').optional(),
+    body('note').optional().isString(),
+], ctrl.updateManualOrderDeliveryInfo);
 router.post('/manual-orders', [
     body('warehouseId').notEmpty().withMessage('warehouseId is required').isInt({ min: 1 }),
     body('type').optional().isIn(['manual_order', 'gift']),

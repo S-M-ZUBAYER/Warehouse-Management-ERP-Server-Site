@@ -1,6 +1,6 @@
 'use strict';
 
-const { query, body } = require('express-validator');
+const { query, body, param } = require('express-validator');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/v1/inventory
@@ -81,9 +81,26 @@ const syncInventoryValidator = [
         .isInt({ min: 1 }).withMessage('Each skuId must be a positive integer'),
 ];
 
+// PUT /api/v1/inventory/:id/stock
+const updateInventoryStockValidator = [
+    param('id')
+        .isInt({ min: 1 }).withMessage('Invalid inventory row id'),
+
+    body('quantity')
+        .notEmpty().withMessage('Quantity is required')
+        .isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
+
+    body('lock')
+        .notEmpty().withMessage('Lock quantity is required')
+        .isInt({ min: 0 }).withMessage('Lock quantity must be a non-negative integer')
+        .custom((value, { req }) => Number(value) <= Number(req.body.quantity))
+        .withMessage('Lock quantity cannot be more than quantity'),
+];
+
 module.exports = {
     listInventoryValidator,
     countInventoryValidator,
     setStockAlertValidator,
     syncInventoryValidator,
+    updateInventoryStockValidator,
 };

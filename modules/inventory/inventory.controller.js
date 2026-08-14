@@ -75,10 +75,24 @@ const syncInventory = async (req, res, next) => {
     } catch (err) { next(err); }
 };
 
+// PUT /api/v1/inventory/:id/stock
+// Edit only quantity and lock quantity for one inventory row
+const updateInventoryStock = async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return sendError(res, 'Validation failed', 400, errors.array().map(e => ({ field: e.path, message: e.msg })));
+        }
+        const result = await service.updateInventoryStock(req.user, req.params.id, req.body);
+        return sendSuccess(res, result.message, result);
+    } catch (err) { next(err); }
+};
+
 module.exports = {
     getDropdowns,
     getInventoryCounts,
     getInventoryList,
     setStockAlert,
     syncInventory,
+    updateInventoryStock,
 };

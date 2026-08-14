@@ -9,6 +9,27 @@ const cacheKey = (companyId, suffix = '') =>
     `company:${companyId}:cache:platform_stores${suffix ? ':' + suffix : ''}`;
 
 const toBool = (value) => value === true || value === 'true' || value === 1 || value === '1';
+const DEFAULT_AUTO_ORDER_ACCEPT_DAYS = '0,1,2,3,4,5,6';
+
+const normalizeAutoOrderAcceptDays = (value) => {
+    const source = Array.isArray(value)
+        ? value
+        : String(value ?? '')
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean);
+    const days = [...new Set(source.map((item) => Number(item)))]
+        .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
+        .sort((a, b) => a - b);
+
+    if (!days.length) {
+        const err = new Error('autoOrderAcceptDays must include at least one day from 0 to 6');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    return days.join(',');
+};
 
 const assertStore = async (user, storeId, options = {}) => {
     const { PlatformStore, Warehouse } = require('../../models');
@@ -169,6 +190,13 @@ const createPlatformStore = async (user, data) => {
         webhook_secret: webhookSecret || null,
         default_warehouse_id: defaultWarehouseId || null,
         is_active: true,
+        auto_order_accept: data.autoOrderAccept !== undefined ? toBool(data.autoOrderAccept) : toBool(data.auto_order_accept),
+        auto_order_accept_days:
+            data.autoOrderAcceptDays !== undefined
+                ? normalizeAutoOrderAcceptDays(data.autoOrderAcceptDays)
+                : data.auto_order_accept_days !== undefined
+                    ? normalizeAutoOrderAcceptDays(data.auto_order_accept_days)
+                    : DEFAULT_AUTO_ORDER_ACCEPT_DAYS,
         created_by: user.userId,
     });
 
@@ -226,6 +254,13 @@ const createPublicPlatformStore = async (data) => {
         webhook_secret: webhookSecret || null,
         default_warehouse_id: defaultWarehouseId || null,
         is_active: true,
+        auto_order_accept: data.autoOrderAccept !== undefined ? toBool(data.autoOrderAccept) : toBool(data.auto_order_accept),
+        auto_order_accept_days:
+            data.autoOrderAcceptDays !== undefined
+                ? normalizeAutoOrderAcceptDays(data.autoOrderAcceptDays)
+                : data.auto_order_accept_days !== undefined
+                    ? normalizeAutoOrderAcceptDays(data.auto_order_accept_days)
+                    : DEFAULT_AUTO_ORDER_ACCEPT_DAYS,
         created_by: companyId,
     });
 
@@ -266,6 +301,10 @@ const updatePlatformStore = async (user, storeId, data) => {
     if (data.region !== undefined) updates.region = data.region;
     if (data.defaultWarehouseId !== undefined) updates.default_warehouse_id = data.defaultWarehouseId;
     if (data.isActive !== undefined) updates.is_active = toBool(data.isActive);
+    if (data.autoOrderAccept !== undefined) updates.auto_order_accept = toBool(data.autoOrderAccept);
+    if (data.auto_order_accept !== undefined) updates.auto_order_accept = toBool(data.auto_order_accept);
+    if (data.autoOrderAcceptDays !== undefined) updates.auto_order_accept_days = normalizeAutoOrderAcceptDays(data.autoOrderAcceptDays);
+    if (data.auto_order_accept_days !== undefined) updates.auto_order_accept_days = normalizeAutoOrderAcceptDays(data.auto_order_accept_days);
     if (data.webhookSecret !== undefined) updates.webhook_secret = data.webhookSecret;
 
     await store.update(updates);

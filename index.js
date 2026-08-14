@@ -16,6 +16,9 @@ const { connectDB } = require('./config/database');
 // const swaggerSpec = require('./config/swagger');
 const swaggerSpec = require('./config/swagger/index');
 const { apiLimiter } = require('./config/rateLimiter');
+const { startAutoOrderAcceptScheduler } = require('./modules/autoOrderAccept/autoOrderAccept.scheduler');
+const { startReturnOrdersScheduler } = require('./modules/returnOrders/returnOrders.scheduler');
+const { startIisLogCleanupScheduler } = require('./workers/iisLogCleanup.scheduler');
 
 // 4. App init
 const app = express();
@@ -196,6 +199,9 @@ app.use((err, _req, res, _next) => {
 // };
 const start = async () => {
     await connectDB();
+    startAutoOrderAcceptScheduler();
+    startReturnOrdersScheduler();
+    startIisLogCleanupScheduler();
 
     const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
     const localIp = getLocalIpAddress();

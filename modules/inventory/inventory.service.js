@@ -732,6 +732,149 @@ const callTikTokUpdateStock = async (mapping, qty) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Dropdown helper — warehouses (reuses same query as merchant SKUs)
 // ─────────────────────────────────────────────────────────────────────────────
+// Update only quantity and lock quantity for one inventory row.
+const updateInventoryStock = async (user, inventoryId, data = {}) => {
+    const {
+        SkuWarehouseStock,
+        MerchantSku,
+        Warehouse,
+        StockLedgerEntry,
+        PlatformSkuMapping,
+    } = require('../../models');
+
+    const id = parseInt(inventoryId, 10);
+    const quantity = parseInt(data.quantity, 10);
+    const lock = parseInt(data.lock, 10);
+
+    if (!Number.isInteger(id) || id <= 0) {
+        const err = new Error('Invalid inventory row id');
+        err.statusCode = 400;
+        throw err;
+    }
+    if (!Number.isInteger(quantity) || quantity < 0 || !Number.isInteger(lock) || lock < 0) {
+        const err = new Error('Quantity and lock quantity must be non-negative integers');
+        err.statusCode = 400;
+        throw err;
+    }
+    if (lock > quantity) {
+        const err = new Error('Lock quantity cannot be more than quantity');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    let updatedItem = null;
+    let markedOutOfSync = 0;
+
+    await sequelize.transaction(async (transaction) => {
+        const stockRecord = await SkuWarehouseStock.findOne({
+            where: { id, company_id: user.companyId },
+            include: [
+                {
+                    model: MerchantSku,
+                    as: 'merchantSku',
+                    attributes: ['id', 'sku_name', 'sku_title', 'gtin', 'image_url', 'status', 'price'],
+                    required: true,
+                },
+                {
+                    model: Warehouse,
+                    as: 'warehouse',
+                    attributes: ['id', 'name', 'code'],
+                    required: false,
+                },
+            ],
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+        });
+
+        if (!stockRecord) {
+            const err = new Error('Inventory record not found');
+            err.statusCode = 404;
+            throw err;
+        }
+
+        await assertWarehousePermission(user, stockRecord.warehouse_id);
+
+        const oldQuantity = Number(stockRecord.qty_on_hand || 0);
+        const oldLock = Number(stockRecord.qty_reserved || 0);
+        const quantityDelta = quantity - oldQuantity;
+
+        await stockRecord.update(
+            {
+                qty_on_hand: quantity,
+                qty_reserved: lock,
+            },
+            { transaction },
+        );
+
+        if (quantityDelta !== 0 || oldLock !== lock) {
+            await StockLedgerEntry.create({
+                company_id: user.companyId,
+                merchant_sku_id: stockRecord.merchant_sku_id,
+                warehouse_id: stockRecord.warehouse_id,
+                sku_warehouse_stock_id: stockRecord.id,
+                movement_type: 'manual_adjustment',
+                quantity_delta: quantityDelta,
+                qty_on_hand_after: quantity,
+                reference_type: 'inventory_stock_edit',
+                reference_id: String(stockRecord.id),
+                notes: `Inventory edit: quantity ${oldQuantity} -> ${quantity}, lock ${oldLock} -> ${lock}`,
+                created_by: user.id || user.userId || null,
+            }, { transaction });
+        }
+
+        const [affectedRows] = await PlatformSkuMapping.update(
+            {
+                sync_status: 'out_of_sync',
+                sync_error: null,
+            },
+            {
+                where: {
+                    company_id: user.companyId,
+                    merchant_sku_id: stockRecord.merchant_sku_id,
+                    is_active: true,
+                    sync_status: { [Op.in]: ['pending', 'synced', 'failed', 'out_of_sync'] },
+                },
+                transaction,
+            },
+        );
+        markedOutOfSync = affectedRows;
+
+        updatedItem = {
+            id: stockRecord.id,
+            qty_on_hand: quantity,
+            qty_reserved: lock,
+            qty_available: Math.max(0, quantity - lock),
+            stock_alert_status: deriveAlertStatus(quantity, stockRecord.min_stock),
+            min_stock: stockRecord.min_stock,
+            merchantSku: stockRecord.merchantSku
+                ? {
+                    id: stockRecord.merchantSku.id,
+                    sku_name: stockRecord.merchantSku.sku_name,
+                    sku_title: stockRecord.merchantSku.sku_title,
+                    gtin: stockRecord.merchantSku.gtin,
+                    image_url: stockRecord.merchantSku.image_url,
+                    status: stockRecord.merchantSku.status,
+                    price: stockRecord.merchantSku.price,
+                }
+                : null,
+            warehouse: stockRecord.warehouse
+                ? { id: stockRecord.warehouse.id, name: stockRecord.warehouse.name, code: stockRecord.warehouse.code }
+                : null,
+        };
+    });
+
+    await redis.flushByPattern(cacheKey(user.companyId, '*'));
+    await redis.flushByPattern(`company:${user.companyId}:cache:platform_sku_mappings*`);
+
+    return {
+        item: updatedItem,
+        mappingsMarkedOutOfSync: markedOutOfSync,
+        message: markedOutOfSync > 0
+            ? `Inventory updated. ${markedOutOfSync} mapped SKU(s) marked out of sync.`
+            : 'Inventory updated.',
+    };
+};
+
 const getInventoryDropdowns = async (user) => {
     const { Warehouse } = require('../../models');
     const where = await applyWarehouseScope(user, { company_id: user.companyId, status: 'active' });
@@ -749,6 +892,7 @@ module.exports = {
     getInventoryList,
     getInventoryCounts,
     setStockAlert,
+    updateInventoryStock,
     syncInventory,
     getInventoryDropdowns,
 };

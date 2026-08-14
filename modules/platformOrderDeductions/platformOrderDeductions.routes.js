@@ -83,6 +83,7 @@ const packStockValidator = [
 
 const skuOverrideValidator = [
     body('platform').notEmpty().withMessage('platform is required').isIn(['shopee', 'tiktok']),
+    body('adjustmentType').optional({ nullable: true }).isIn(['exchange', 'add']),
     body('replacementMerchantSkuId').optional({ nullable: true }).isInt({ min: 1 }),
     body('replacementCombineSkuId').optional({ nullable: true }).isInt({ min: 1 }),
     body('replacementWarehouseId').notEmpty().withMessage('replacementWarehouseId is required').isInt({ min: 1 }),
@@ -98,7 +99,8 @@ const skuOverrideValidator = [
         if (!value.platformOrderId && !value.orderId && !value.order?.orderId && !value.order?.orderNo && !value.order?.id) {
             throw new Error('orderId is required');
         }
-        if (!value.platformOrderItemId && !value.orderItemId) {
+        const adjustmentType = value.adjustmentType || value.adjustment_type || value.type || 'exchange';
+        if (adjustmentType !== 'add' && !value.platformOrderItemId && !value.orderItemId) {
             throw new Error('platformOrderItemId is required');
         }
         return true;
@@ -119,11 +121,16 @@ const deleteSkuOverrideValidator = [
 ];
 
 publicShopeeRouter.post('/', shopeeDeductValidator, ctrl.deductShopeeOrderNotification);
+publicShopeeRouter.post('/cancel', shopeeDeductValidator, ctrl.cancelShopeeReservedOrderNotification);
 publicTikTokRouter.post('/', tiktokDeductValidator, ctrl.deductTikTokOrderNotification);
+publicTikTokRouter.post('/cancel', tiktokDeductValidator, ctrl.cancelTikTokReservedOrderNotification);
 
+router.get('/sku-adjustments', ctrl.listPlatformOrderSkuAdjustments);
 router.post('/sku-override', skuOverrideValidator, ctrl.savePlatformOrderItemSkuOverride);
 router.delete('/sku-override', deleteSkuOverrideValidator, ctrl.deletePlatformOrderSkuOverrides);
 router.post('/pack-stock', packStockValidator, ctrl.finalizePackedOrderNotification);
+router.post('/shopee/cancel', shopeeDeductValidator, ctrl.cancelShopeeReservedOrderNotification);
+router.post('/tiktok/cancel', tiktokDeductValidator, ctrl.cancelTikTokReservedOrderNotification);
 router.post('/shopee', shopeeDeductValidator, ctrl.deductShopeeOrderNotification);
 router.post('/tiktok', tiktokDeductValidator, ctrl.deductTikTokOrderNotification);
 

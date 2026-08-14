@@ -27,6 +27,31 @@ const handleDeductFromOrderNotification = (platform) => async (req, res, next) =
     }
 };
 
+const handleCancelReservedOrderNotification = (platform) => async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return sendError(
+                res,
+                'Validation failed',
+                400,
+                errors.array().map((e) => ({ field: e.path, message: e.msg }))
+            );
+        }
+
+        const result = await service.cancelReservedOrderNotification(platform, req.body);
+        return sendSuccess(
+            res,
+            result.alreadyDeducted
+                ? 'Reserved stock cannot be released because order is already packed'
+                : (result.alreadyReleased ? 'Reserved stock already released' : 'Reserved stock released successfully'),
+            result
+        );
+    } catch (err) {
+        next(err);
+    }
+};
+
 const finalizePackedOrderNotification = async (req, res, next) => {
     try {
         const errors = validationResult(req);
@@ -65,6 +90,15 @@ const savePlatformOrderItemSkuOverride = async (req, res, next) => {
     }
 };
 
+const listPlatformOrderSkuAdjustments = async (req, res, next) => {
+    try {
+        const result = await service.listPlatformOrderSkuAdjustments(req.query);
+        return sendSuccess(res, 'Platform order SKU adjustments loaded', result);
+    } catch (err) {
+        next(err);
+    }
+};
+
 const deletePlatformOrderSkuOverrides = async (req, res, next) => {
     try {
         const errors = validationResult(req);
@@ -87,7 +121,10 @@ const deletePlatformOrderSkuOverrides = async (req, res, next) => {
 module.exports = {
     deductShopeeOrderNotification: handleDeductFromOrderNotification('shopee'),
     deductTikTokOrderNotification: handleDeductFromOrderNotification('tiktok'),
+    cancelShopeeReservedOrderNotification: handleCancelReservedOrderNotification('shopee'),
+    cancelTikTokReservedOrderNotification: handleCancelReservedOrderNotification('tiktok'),
     finalizePackedOrderNotification,
     savePlatformOrderItemSkuOverride,
+    listPlatformOrderSkuAdjustments,
     deletePlatformOrderSkuOverrides,
 };
