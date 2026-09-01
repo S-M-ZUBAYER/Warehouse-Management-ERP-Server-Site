@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 module.exports = {
     schemas: {
@@ -308,7 +308,193 @@ module.exports = {
                 },
             },
         },
-        '/order-management/manual-orders/easyparcel/rates': {
+        '/order-management/manual-orders/shipping-wallet': {
+            get: {
+                tags: ['Manual Orders'],
+                summary: 'Get Manual Order shipping wallet balance',
+                description: 'Returns the company-scoped MYR shipping wallet balance and supported top-up currency conversion rates. Manual orders without courier booking do not use this wallet.',
+                security: [{ bearerAuth: [] }],
+                responses: {
+                    200: {
+                        description: 'Company shipping wallet summary',
+                        content: {
+                            'application/json': {
+                                schema: {
+                                    type: 'object',
+                                    properties: {
+                                        status: { type: 'boolean', example: true },
+                                        data: {
+                                            type: 'object',
+                                            properties: {
+                                                wallet: {
+                                                    type: 'object',
+                                                    properties: {
+                                                        id: { type: 'integer', example: 1 },
+                                                        companyId: { type: 'integer', example: 10 },
+                                                        currency: { type: 'string', example: 'MYR' },
+                                                        balanceMyr: { type: 'number', example: 85.5 },
+                                                        updatedAt: { type: 'string', format: 'date-time' },
+                                                    },
+                                                },
+                                                supportedTopUpCurrencies: { type: 'array', items: { type: 'string' }, example: ['MYR', 'USD', 'SGD', 'THB', 'IDR', 'CNY', 'PHP', 'VND'] },
+                                                fxRatesToMyr: { type: 'object', additionalProperties: { type: 'number' }, example: { MYR: 1, USD: 4.7, SGD: 3.5 } },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        '/order-management/manual-orders/shipping-wallet/ledger': {
+            get: {
+                tags: ['Manual Orders'],
+                summary: 'List Manual Order shipping wallet ledger',
+                description: 'Returns company-scoped wallet top-up, courier debit, and refund ledger entries.',
+                security: [{ bearerAuth: [] }],
+                parameters: [
+                    { in: 'query', name: 'limit', required: false, schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+                ],
+                responses: {
+                    200: {
+                        description: 'Shipping wallet ledger rows',
+                        content: {
+                            'application/json': {
+                                schema: {
+                                    type: 'object',
+                                    properties: {
+                                        status: { type: 'boolean', example: true },
+                                        data: {
+                                            type: 'array',
+                                            items: {
+                                                type: 'object',
+                                                properties: {
+                                                    id: { type: 'integer', example: 12 },
+                                                    type: { type: 'string', enum: ['topup', 'courier_debit', 'refund'], example: 'courier_debit' },
+                                                    amountMyr: { type: 'number', example: -8.5 },
+                                                    balanceBeforeMyr: { type: 'number', example: 50 },
+                                                    balanceAfterMyr: { type: 'number', example: 41.5 },
+                                                    originalAmount: { type: 'number', example: 8.5 },
+                                                    originalCurrency: { type: 'string', example: 'MYR' },
+                                                    fxRateToMyr: { type: 'number', example: 1 },
+                                                    provider: { type: 'string', example: 'easyparcel' },
+                                                    reference: { type: 'string', example: 'easyparcel:123:1787390000000' },
+                                                    status: { type: 'string', example: 'succeeded' },
+                                                    manualOrderId: { type: 'integer', nullable: true, example: 123 },
+                                                    createdAt: { type: 'string', format: 'date-time' },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        '/order-management/manual-orders/shipping-wallet/checkout': {
+            post: {
+                tags: ['Manual Orders'],
+                summary: 'Create Manual Order shipping wallet Stripe checkout',
+                description: 'Owner-only endpoint. Creates a Stripe Checkout session for company shipping wallet top-up. Non-MYR top-ups use the live FX rate to MYR plus the configured margin. The wallet credit is stored net of the configured payment processing reserve.',
+                security: [{ bearerAuth: [] }],
+                requestBody: {
+                    required: true,
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                required: ['amount'],
+                                properties: {
+                                    amount: { type: 'number', minimum: 0.01, example: 50 },
+                                    currency: { type: 'string', enum: ['MYR', 'USD', 'SGD', 'THB', 'IDR', 'CNY', 'PHP', 'VND'], example: 'MYR' },
+                                },
+                            },
+                        },
+                    },
+                },
+                responses: {
+                    201: {
+                        description: 'Stripe checkout session created',
+                        content: {
+                            'application/json': {
+                                schema: {
+                                    type: 'object',
+                                    properties: {
+                                        status: { type: 'boolean', example: true },
+                                        data: {
+                                            type: 'object',
+                                            properties: {
+                                                sessionId: { type: 'string', example: 'cs_test_123' },
+                                                checkoutUrl: { type: 'string', example: 'https://checkout.stripe.com/c/pay/cs_test_123' },
+                                                paymentProvider: { type: 'string', example: 'stripe' },
+                                                originalAmount: { type: 'number', example: 50 },
+                                                originalCurrency: { type: 'string', example: 'MYR' },
+                                                amountMyr: { type: 'number', example: 46 },
+                                                grossAmountMyr: { type: 'number', example: 50 },
+                                                topUpFeeReserveMyr: { type: 'number', example: 4 },
+                                                fxRateToMyr: { type: 'number', example: 1 },
+                                                baseFxRateToMyr: { type: 'number', example: 1 },
+                                                fxMarginToMyr: { type: 'number', example: 0 },
+                                                fxSource: { type: 'string', example: 'wallet_currency' },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        '/order-management/manual-orders/shipping-wallet/checkout/complete': {
+            post: {
+                tags: ['Manual Orders'],
+                summary: 'Confirm Manual Order shipping wallet Stripe checkout',
+                description: 'Owner-only endpoint. Verifies the Stripe session belongs to the same company/user and credits the company shipping wallet once.',
+                security: [{ bearerAuth: [] }],
+                requestBody: {
+                    required: true,
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                required: ['sessionId'],
+                                properties: {
+                                    sessionId: { type: 'string', example: 'cs_test_123' },
+                                },
+                            },
+                        },
+                    },
+                },
+                responses: {
+                    200: {
+                        description: 'Wallet top-up confirmed',
+                        content: {
+                            'application/json': {
+                                schema: {
+                                    type: 'object',
+                                    properties: {
+                                        status: { type: 'boolean', example: true },
+                                        data: {
+                                            type: 'object',
+                                            properties: {
+                                                wallet: { type: 'object' },
+                                                ledger: { type: 'object' },
+                                                supportedTopUpCurrencies: { type: 'array', items: { type: 'string' } },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },        '/order-management/manual-orders/easyparcel/rates': {
             get: {
                 tags: ['Manual Orders'],
                 summary: 'Get EasyParcel rates for manual order',
@@ -940,4 +1126,8 @@ module.exports = {
         },
     },
 };
+
+
+
+
 

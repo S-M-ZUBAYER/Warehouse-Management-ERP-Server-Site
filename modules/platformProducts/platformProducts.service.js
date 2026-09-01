@@ -4,6 +4,7 @@ const axios  = require('axios');
 const { Op } = require('sequelize');
 
 const { getPermittedStoreIds, assertStorePermission } = require('../../utils/permissions');
+const { assertStoreSubscriptionActive } = require('../subscription/subscription.service');
 const JAVA_BASE = process.env.JAVA_API_URL ?? 'http://localhost:8080';
 
 // ─── Axios instance for Java proxy ───────────────────────────────────────────
@@ -475,6 +476,7 @@ const syncAllStores = async (user, filters = {}) => {
     const results = [];
     for (const store of stores) {
         try {
+            await assertStoreSubscriptionActive(store, 'product sync');
             let count = 0;
             if (store.platform === 'shopee') {
                 count = await syncShopeeStore(store, PlatformProduct);
@@ -765,30 +767,71 @@ const getPlatformProductCounts = async (user, filters = {}) => {
     const { sequelize } = require('../../config/database');
     const { platformStoreId, platform } = filters;
 
-    const storeClause    = platformStoreId ? `AND pp.platform_store_id = :storeId` : '';
+    const permittedStoreIds = await getPermittedStoreIds(user);
+    if (Array.isArray(permittedStoreIds)) {
+        if (!permittedStoreIds.length) return { all: 0, mapped: 0, unmapped: 0 };
+        if (platformStoreId && !permittedStoreIds.includes(Number(platformStoreId))) {
+            await assertStorePermission(user, platformStoreId);
+        }
+    }
+
+    const storeClause = platformStoreId
+        ? `AND pp.platform_store_id = :storeId`
+        : Array.isArray(permittedStoreIds)
+            ? `AND pp.platform_store_id IN (:permittedStoreIds)`
+            : '';
     const platformClause = platform && platform !== 'all' ? `AND pp.platform = :platform` : '';
 
     const [result] = await sequelize.query(
         `SELECT
-             COUNT(DISTINCT pp.id) AS \`all\`,
-             COUNT(DISTINCT CASE WHEN COALESCE(cmap.mapped_count, 0) > 0 OR pp.is_mapped = 1 THEN pp.id END) AS mapped,
-             COUNT(DISTINCT CASE WHEN COALESCE(cmap.mapped_count, 0) = 0 AND pp.is_mapped = 0 THEN pp.id END) AS unmapped
-         FROM platform_products pp
-         LEFT JOIN (
-             SELECT platform_store_id, platform_product_id, SUM(CASE WHEN is_mapped = 1 THEN 1 ELSE 0 END) AS mapped_count
-             FROM platform_products
-             WHERE company_id = :companyId AND row_type = 'child'
-             GROUP BY platform_store_id, platform_product_id
-         ) cmap ON cmap.platform_store_id = pp.platform_store_id AND cmap.platform_product_id = pp.platform_product_id
-         WHERE pp.company_id = :companyId
-           AND pp.row_type = 'parent'
-           ${storeClause}
-           ${platformClause}`,
+             COUNT(*) AS \`all\`,
+             SUM(CASE WHEN stats.mapped_children > 0 THEN 1 ELSE 0 END) AS mapped,
+             SUM(CASE WHEN stats.child_count = 0 OR stats.unmapped_children > 0 THEN 1 ELSE 0 END) AS unmapped
+         FROM (
+             SELECT
+                 parent_groups.platform_store_id,
+                 parent_groups.platform,
+                 parent_groups.platform_product_id,
+                 COUNT(child.id) AS child_count,
+                 SUM(CASE WHEN COALESCE(active_map.mapping_count, 0) > 0 THEN 1 ELSE 0 END) AS mapped_children,
+                 SUM(CASE WHEN child.id IS NOT NULL AND COALESCE(active_map.mapping_count, 0) = 0 THEN 1 ELSE 0 END) AS unmapped_children
+             FROM (
+                 SELECT pp.platform_store_id, pp.platform, pp.platform_product_id
+                 FROM platform_products pp
+                 WHERE pp.company_id = :companyId
+                   AND pp.row_type = 'parent'
+                   ${storeClause}
+                   ${platformClause}
+                 GROUP BY pp.platform_store_id, pp.platform, pp.platform_product_id
+             ) parent_groups
+             LEFT JOIN platform_products child
+               ON child.company_id = :companyId
+              AND child.row_type = 'child'
+              AND child.platform_store_id = parent_groups.platform_store_id
+              AND child.platform_product_id = parent_groups.platform_product_id
+             LEFT JOIN (
+                 SELECT
+                     platform_store_id,
+                     COALESCE(platform_listing_id, platform_product_id) AS platform_listing_id,
+                     COALESCE(platform_sku_id, '') AS platform_sku_id,
+                     COUNT(*) AS mapping_count
+                 FROM platform_sku_mappings
+                 WHERE company_id = :companyId
+                   AND is_active = 1
+                   AND deleted_at IS NULL
+                 GROUP BY platform_store_id, COALESCE(platform_listing_id, platform_product_id), COALESCE(platform_sku_id, '')
+             ) active_map
+               ON active_map.platform_store_id = child.platform_store_id
+              AND active_map.platform_listing_id = child.platform_product_id
+              AND active_map.platform_sku_id = COALESCE(child.platform_sku_id, '')
+             GROUP BY parent_groups.platform_store_id, parent_groups.platform, parent_groups.platform_product_id
+         ) stats`,
         {
             replacements: {
-                companyId: user.companyId,
-                storeId:   platformStoreId ? parseInt(platformStoreId, 10) : null,
-                platform:  platform ?? null,
+                companyId:          user.companyId,
+                storeId:            platformStoreId ? parseInt(platformStoreId, 10) : null,
+                permittedStoreIds:  Array.isArray(permittedStoreIds) ? permittedStoreIds : null,
+                platform:           platform ?? null,
             },
             type: sequelize.QueryTypes.SELECT,
         }
@@ -854,161 +897,220 @@ const generateMerchantSku = async (user, body) => {
         include: [{
             model: PlatformStore,
             as: 'platformStore',
-            attributes: ['id', 'platform', 'external_store_id', 'store_shop_id', 'store_open_id', 'store_cipher'],
+            attributes: ['id', 'company_id', 'platform', 'region', 'external_store_id', 'store_shop_id', 'store_open_id', 'store_cipher'],
             required: false,
         }],
     });
 
-    if (!products.length) {
-        const err = new Error('No valid child SKU rows found');
-        err.statusCode = 404;
-        throw err;
-    }
-
+    const productById = new Map(products.map((product) => [Number(product.id), product]));
+    const requestedIds = platformProductIds
+        .map((id) => parseInt(id, 10))
+        .filter(Boolean);
     const created = [];
+    const skipped = [];
+    const failed = [];
     const warehouseCode = getWarehouseCode(warehouse);
 
-    for (const product of products) {
-        const skuName = buildMerchantSkuName(
-            product.platform,
-            product.seller_sku,
-            warehouseCode,
-            product.platform_product_id,
-            product.platform_sku_id
-        );
+    for (const platformProductId of requestedIds) {
+        const product = productById.get(platformProductId);
 
-        const skuTitle = product.variation_name
-            ? `${product.product_name} - ${product.variation_name}`
-            : product.product_name;
-
-        const productDetails = JSON.stringify({
-            source: 'platform_products',
-            platform: product.platform,
-            platform_store_id: product.platform_store_id,
-            platform_product_id: product.platform_product_id,
-            platform_sku_id: product.platform_sku_id,
-            seller_sku: product.seller_sku,
-            variant_name: product.variation_name,
-        });
-
-        const [msku, wasCreated] = await MerchantSku.findOrCreate({
-            where: {
-                company_id: user.companyId,
-                sku_name: skuName,
-            },
-            defaults: {
-                company_id: user.companyId,
-                warehouse_id: parsedWarehouseId,
-                sku_name: skuName,
-                sku_title: skuTitle,
-                product_details: productDetails,
-                gtin: product.gtin || null,
-                weight: product.weight,
-                length: product.length,
-                width: product.width,
-                height: product.height,
-                price: product.platform_price,
-                image_url: product.image_url,
-                status: 'active',
-                created_by: user.userId,
-            },
-        });
-
-        if (!wasCreated) {
-            await msku.update({
-                warehouse_id: msku.warehouse_id || parsedWarehouseId,
-                sku_title: skuTitle,
-                product_details: productDetails,
-                ...(product.gtin ? { gtin: product.gtin } : {}),
-                weight: product.weight ?? msku.weight,
-                length: product.length ?? msku.length,
-                width: product.width ?? msku.width,
-                height: product.height ?? msku.height,
-                price: product.platform_price ?? msku.price,
-                image_url: product.image_url ?? msku.image_url,
+        if (!product) {
+            failed.push({
+                platformProductId,
+                reason: 'SKU row was not found or is not a valid child SKU for this company',
             });
+            continue;
         }
 
-        const [stockRow, stockCreated] = await SkuWarehouseStock.findOrCreate({
-            where: {
-                merchant_sku_id: msku.id,
-                warehouse_id: parsedWarehouseId,
-            },
-            defaults: {
-                company_id: user.companyId,
-                merchant_sku_id: msku.id,
-                warehouse_id: parsedWarehouseId,
-                qty_on_hand: product.platform_stock || 0,
-                qty_reserved: 0,
-                qty_inbound: 0,
-            },
-        });
-
-        if (!stockCreated) {
-            await stockRow.update({
-                qty_on_hand: product.platform_stock ?? stockRow.qty_on_hand,
+        if (!String(product.seller_sku || '').trim()) {
+            skipped.push({
+                platformProductId: product.id,
+                productName: product.product_name,
+                variationName: product.variation_name,
+                sellerSku: product.seller_sku,
+                reason: 'Seller SKU is empty',
             });
+            continue;
         }
 
-        // A platform child/variant SKU should be mapped by its own platform_sku_id,
-        // not only by parent product/store. This prevents every variant under the
-        // same parent from showing the first generated Merchant SKU.
-        await PlatformSkuMapping.update(
-            { is_active: false, deleted_at: new Date() },
-            {
+        try {
+            await assertStoreSubscriptionActive(product.platformStore, 'SKU mapping');
+
+            const skuName = buildMerchantSkuName(
+                product.platform,
+                product.seller_sku,
+                warehouseCode,
+                product.platform_product_id,
+                product.platform_sku_id
+            );
+
+            if (!skuName) {
+                throw new Error('Unable to build Merchant SKU name');
+            }
+
+            const skuTitle = product.variation_name
+                ? `${product.product_name} - ${product.variation_name}`
+                : product.product_name;
+
+            const productDetails = JSON.stringify({
+                source: 'platform_products',
+                platform: product.platform,
+                platform_store_id: product.platform_store_id,
+                platform_product_id: product.platform_product_id,
+                platform_sku_id: product.platform_sku_id,
+                seller_sku: product.seller_sku,
+                variant_name: product.variation_name,
+            });
+
+            const [msku, wasCreated] = await MerchantSku.findOrCreate({
+                where: {
+                    company_id: user.companyId,
+                    sku_name: skuName,
+                },
+                defaults: {
+                    company_id: user.companyId,
+                    warehouse_id: parsedWarehouseId,
+                    sku_name: skuName,
+                    sku_title: skuTitle,
+                    product_details: productDetails,
+                    gtin: product.gtin || null,
+                    weight: product.weight,
+                    length: product.length,
+                    width: product.width,
+                    height: product.height,
+                    price: product.platform_price,
+                    image_url: product.image_url,
+                    status: 'active',
+                    created_by: user.userId,
+                },
+            });
+
+            if (!wasCreated) {
+                await msku.update({
+                    warehouse_id: msku.warehouse_id || parsedWarehouseId,
+                    sku_title: skuTitle,
+                    product_details: productDetails,
+                    ...(product.gtin ? { gtin: product.gtin } : {}),
+                    weight: product.weight ?? msku.weight,
+                    length: product.length ?? msku.length,
+                    width: product.width ?? msku.width,
+                    height: product.height ?? msku.height,
+                    price: product.platform_price ?? msku.price,
+                    image_url: product.image_url ?? msku.image_url,
+                });
+            }
+
+            const [stockRow, stockCreated] = await SkuWarehouseStock.findOrCreate({
+                where: {
+                    merchant_sku_id: msku.id,
+                    warehouse_id: parsedWarehouseId,
+                },
+                defaults: {
+                    company_id: user.companyId,
+                    merchant_sku_id: msku.id,
+                    warehouse_id: parsedWarehouseId,
+                    qty_on_hand: product.platform_stock || 0,
+                    qty_reserved: 0,
+                    qty_inbound: 0,
+                },
+            });
+
+            if (!stockCreated) {
+                await stockRow.update({
+                    qty_on_hand: product.platform_stock ?? stockRow.qty_on_hand,
+                });
+            }
+
+            // A platform child/variant SKU should be mapped by its own platform_sku_id,
+            // not only by parent product/store. This prevents every variant under the
+            // same parent from showing the first generated Merchant SKU.
+            await PlatformSkuMapping.update(
+                { is_active: false, deleted_at: new Date() },
+                {
+                    where: {
+                        company_id: user.companyId,
+                        platform_store_id: product.platform_store_id,
+                        platform_listing_id: product.platform_product_id,
+                        platform_sku_id: product.platform_sku_id,
+                        is_active: true,
+                        deleted_at: null,
+                        merchant_sku_id: { [Op.ne]: msku.id },
+                    },
+                }
+            );
+
+            const mappingDefaults = {
+                company_id: user.companyId,
+                merchant_sku_id: msku.id,
+                ...buildPlatformMappingFields(product, product.platformStore, parsedWarehouseId, user.userId),
+            };
+
+            let mapping = await PlatformSkuMapping.findOne({
                 where: {
                     company_id: user.companyId,
                     platform_store_id: product.platform_store_id,
                     platform_listing_id: product.platform_product_id,
                     platform_sku_id: product.platform_sku_id,
+                },
+                paranoid: false,
+            });
+            const mappingCreated = !mapping;
+
+            if (mapping) {
+                await mapping.update({
+                    ...mappingDefaults,
                     is_active: true,
                     deleted_at: null,
-                    merchant_sku_id: { [Op.ne]: msku.id },
-                },
+                }, { paranoid: false });
+            } else {
+                mapping = await PlatformSkuMapping.create(mappingDefaults);
             }
-        );
 
-        const mappingDefaults = {
-            company_id: user.companyId,
-            merchant_sku_id: msku.id,
-            ...buildPlatformMappingFields(product, product.platformStore, parsedWarehouseId, user.userId),
-        };
+            await product.update({ is_mapped: true });
 
-        const [mapping, mappingCreated] = await PlatformSkuMapping.findOrCreate({
-            where: {
-                company_id: user.companyId,
-                merchant_sku_id: msku.id,
-                platform_store_id: product.platform_store_id,
-                platform_listing_id: product.platform_product_id,
-                platform_sku_id: product.platform_sku_id,
-            },
-            defaults: mappingDefaults,
-            paranoid: false,
-        });
-
-        if (!mappingCreated) {
-            await mapping.update({
-                ...mappingDefaults,
-                is_active: true,
-                deleted_at: null,
-            }, { paranoid: false });
+            created.push({
+                platformProductId: product.id,
+                productName: product.product_name,
+                sellerSku: product.seller_sku,
+                merchantSkuId: msku.id,
+                skuName: msku.sku_name,
+                wasCreated,
+                mappingCreated,
+            });
+        } catch (err) {
+            failed.push({
+                platformProductId: product.id,
+                productName: product.product_name,
+                sellerSku: product.seller_sku,
+                reason: err.message || 'Failed to generate Merchant SKU',
+            });
         }
-
-        await product.update({ is_mapped: true });
-
-        created.push({
-            platformProductId: product.id,
-            merchantSkuId: msku.id,
-            skuName: msku.sku_name,
-            wasCreated,
-            mappingCreated,
-        });
     }
 
+    const createdCount = created.filter((item) => item.wasCreated).length;
+    const reusedCount = created.length - createdCount;
+    const mappedCount = created.length;
+    const skippedCount = skipped.length;
+    const failedCount = failed.length;
+    const messageParts = [];
+    if (createdCount) messageParts.push(`${createdCount} created`);
+    if (reusedCount) messageParts.push(`${reusedCount} reused`);
+    if (mappedCount) messageParts.push(`${mappedCount} mapped`);
+    if (skippedCount) messageParts.push(`${skippedCount} skipped`);
+    if (failedCount) messageParts.push(`${failedCount} failed`);
+
     return {
-        created: created.length,
+        created: createdCount,
+        reused: reusedCount,
+        mapped: mappedCount,
+        skipped: skippedCount,
+        failed: failedCount,
         skus: created,
-        message: `${created.length} Merchant SKU(s) generated successfully`,
+        skippedItems: skipped,
+        failedItems: failed,
+        message: messageParts.length
+            ? `Merchant SKU generation completed: ${messageParts.join(', ')}`
+            : 'No Merchant SKU(s) generated',
     };
 };
 
@@ -1059,7 +1161,7 @@ const autoMapping = async (user, body) => {
         include: [{
             model: PlatformStore,
             as: 'platformStore',
-            attributes: ['id', 'platform', 'external_store_id', 'store_shop_id', 'store_open_id', 'store_cipher'],
+            attributes: ['id', 'company_id', 'platform', 'region', 'external_store_id', 'store_shop_id', 'store_open_id', 'store_cipher'],
             required: false,
         }],
     });
@@ -1075,6 +1177,17 @@ const autoMapping = async (user, body) => {
 
     for (const product of sourceProducts) {
         let merchantSku = null;
+        try {
+            await assertStoreSubscriptionActive(product.platformStore, 'SKU mapping');
+        } catch (err) {
+            failed.push({
+                platformProductId: product.id,
+                sellerSku: product.seller_sku,
+                productName: product.product_name,
+                reason: err.message,
+            });
+            continue;
+        }
 
         // Auto mapping must use the child/variant seller SKU, not any previous
         // parent/product-level mapping row. Older inactive/wrong mappings are
@@ -1187,6 +1300,7 @@ const updatePlatformStock = async (user, body) => {
         const err = new Error('Mapping not found');
         err.statusCode = 404; throw err;
     }
+    await assertStoreSubscriptionActive(mapping.platformStore, 'platform stock updates');
 
     const platform = mapping.platformStore?.platform;
     let result;
@@ -1230,15 +1344,17 @@ const updatePlatformStock = async (user, body) => {
 // 7. unlinkMapping — remove a platform_sku_mapping (unmap action)
 // ─────────────────────────────────────────────────────────────────────────────
 const unlinkMapping = async (user, mappingId) => {
-    const { PlatformSkuMapping, PlatformProduct } = require('../../models');
+    const { PlatformSkuMapping, PlatformProduct, PlatformStore } = require('../../models');
 
     const mapping = await PlatformSkuMapping.findOne({
         where: { id: mappingId, company_id: user.companyId },
+        include: [{ model: PlatformStore, as: 'platformStore' }],
     });
     if (!mapping) {
         const err = new Error('Mapping not found');
         err.statusCode = 404; throw err;
     }
+    await assertStoreSubscriptionActive(mapping.platformStore, 'SKU mapping');
 
     // Soft-delete the mapping
     await mapping.update({ is_active: false, deleted_at: new Date() });
@@ -1452,7 +1568,7 @@ const mapMerchantSkuToProduct = async (user, body) => {
         include: [{
             model:      PlatformStore,
             as:         'platformStore',
-            attributes: ['id', 'platform', 'store_shop_id', 'store_open_id', 'store_cipher'],
+            attributes: ['id', 'company_id', 'platform', 'region', 'external_store_id', 'store_shop_id', 'store_open_id', 'store_cipher'],
         }],
     });
     if (!platformProduct) {
@@ -1462,6 +1578,8 @@ const mapMerchantSkuToProduct = async (user, body) => {
     }
  
     // ── 2. Load the merchant SKU row ──────────────────────────────────────────
+    await assertStoreSubscriptionActive(platformProduct.platformStore, 'SKU mapping');
+
     const merchantSku = await MerchantSku.findOne({
         where: { id: merchantSkuId, company_id: user.companyId, deleted_at: null },
         attributes: ['id', 'sku_name', 'warehouse_id'],

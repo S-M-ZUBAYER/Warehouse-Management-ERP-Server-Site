@@ -36,6 +36,11 @@ const deriveAlertStatus = (qtyOnHand, minStock) => {
     return 'In Stock';
 };
 
+const sameId = (left, right) =>
+    left !== null && left !== undefined &&
+    right !== null && right !== undefined &&
+    String(left) === String(right);
+
 /**
  * Build the search WHERE clause based on skuType.
  * skuType: 'sku_name' | 'product_name' | 'gtin' | 'store_id'
@@ -52,6 +57,26 @@ const buildSearchWhere = (search, skuType) => {
         case 'sku_name':
         default: return { '$merchantSku.sku_name$': { [Op.like]: q } };
     }
+};
+
+const exactWarehouseMappingExistsSql = (companyId, { platformStoreLike = null, negate = false } = {}) => {
+    const clauses = [
+        `psm.company_id = ${sequelize.escape(companyId)}`,
+        'psm.merchant_sku_id = `SkuWarehouseStock`.`merchant_sku_id`',
+        'psm.fulfillment_warehouse_id = `SkuWarehouseStock`.`warehouse_id`',
+        'psm.is_active = 1',
+        'psm.deleted_at IS NULL',
+    ];
+
+    if (platformStoreLike) {
+        clauses.push(`CAST(psm.platform_store_id AS CHAR) LIKE ${sequelize.escape(platformStoreLike)}`);
+    }
+
+    return `${negate ? 'NOT ' : ''}EXISTS (
+        SELECT 1
+        FROM platform_sku_mappings psm
+        WHERE ${clauses.join(' AND ')}
+    )`;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -131,30 +156,23 @@ const getInventoryList = async (user, filters = {}) => {
         mappingInclude.required = true;   // converts to INNER JOIN → only mapped
     }
 
-    const activeMappingWhere = {
-        company_id: user.companyId,
-        is_active: true,
-        deleted_at: null,
-        merchant_sku_id: { [Op.ne]: null },
-    };
+    const platformStoreLike = skuType === 'store_id' && search?.trim()
+        ? `%${search.trim()}%`
+        : null;
+    const stockWhereAnd = [];
 
-    if (searchWhere && searchWhere['$mapping.platform_store_id$']) {
-        activeMappingWhere.platform_store_id = searchWhere['$mapping.platform_store_id$'];
+    if (mappingStatus === 'mapped') {
+        stockWhereAnd.push(sequelize.literal(exactWarehouseMappingExistsSql(user.companyId, { platformStoreLike })));
+    } else if (mappingStatus === 'unmapped') {
+        stockWhereAnd.push(sequelize.literal(exactWarehouseMappingExistsSql(user.companyId, { negate: true })));
     }
 
-    if (mappingStatus !== 'all' || activeMappingWhere.platform_store_id) {
-        const mappedRows = await PlatformSkuMapping.findAll({
-            where: activeMappingWhere,
-            attributes: ['merchant_sku_id'],
-            raw: true,
-        });
-        const mappedMerchantSkuIds = [...new Set(mappedRows.map((row) => row.merchant_sku_id).filter(Boolean))];
+    if (platformStoreLike && mappingStatus !== 'mapped') {
+        stockWhereAnd.push(sequelize.literal(exactWarehouseMappingExistsSql(user.companyId, { platformStoreLike })));
+    }
 
-        if (mappingStatus === 'mapped' || activeMappingWhere.platform_store_id) {
-            stockWhere.merchant_sku_id = { [Op.in]: mappedMerchantSkuIds.length ? mappedMerchantSkuIds : [-1] };
-        } else if (mappingStatus === 'unmapped' && mappedMerchantSkuIds.length) {
-            stockWhere.merchant_sku_id = { [Op.notIn]: mappedMerchantSkuIds };
-        }
+    if (stockWhereAnd.length) {
+        stockWhere[Op.and] = stockWhereAnd;
     }
 
     const offset = (parseInt(page, 10) - 1) * parseInt(limit, 10);
@@ -184,15 +202,17 @@ const getInventoryList = async (user, filters = {}) => {
 
     // ── Post-process: filter unmapped if needed, derive alert status ────────
     const merchantSkuIds = [...new Set(rows.map((record) => record.merchantSku?.id).filter(Boolean))];
+    const warehouseIds = [...new Set(rows.map((record) => record.warehouse_id).filter(Boolean))];
     const mappingsByMerchantSkuId = new Map();
 
-    if (merchantSkuIds.length) {
+    if (merchantSkuIds.length && warehouseIds.length) {
         const mappings = await PlatformSkuMapping.findAll({
             where: {
                 company_id: user.companyId,
                 is_active: true,
                 deleted_at: null,
                 merchant_sku_id: { [Op.in]: merchantSkuIds },
+                fulfillment_warehouse_id: { [Op.in]: warehouseIds },
             },
             attributes: [
                 'id',
@@ -226,7 +246,8 @@ const getInventoryList = async (user, filters = {}) => {
     }
 
     const data = rows.map((record) => {
-        const mappings = mappingsByMerchantSkuId.get(record.merchantSku?.id) ?? [];
+        const mappings = (mappingsByMerchantSkuId.get(record.merchantSku?.id) ?? [])
+            .filter((mapping) => sameId(mapping.fulfillment_warehouse_id, record.warehouse_id));
         const isMapped = mappings.length > 0;
         const alertStatus = deriveAlertStatus(record.qty_on_hand, record.min_stock);
 
@@ -322,9 +343,11 @@ const getInventoryCounts = async (user, filters = {}) => {
              ON ms.id = sws.merchant_sku_id
              AND ms.deleted_at IS NULL
          LEFT JOIN platform_sku_mappings psm
-             ON psm.merchant_sku_id = ms.id
-             AND psm.is_active      = 1
-             AND psm.deleted_at     IS NULL
+              ON psm.merchant_sku_id = ms.id
+              AND psm.fulfillment_warehouse_id = sws.warehouse_id
+              AND psm.company_id      = sws.company_id
+              AND psm.is_active      = 1
+              AND psm.deleted_at     IS NULL
          WHERE sws.company_id = :companyId
          ${warehouseClause}`,
         {
@@ -484,7 +507,23 @@ const syncInventory = async (user, data) => {
     
 
     // ── Step 1: Resolve sku_warehouse_stock IDs → stock records ──────────────
-    let stockMap = {}; // merchant_sku_id → qty_available
+    const stockRows = [];
+    const stockByWarehouseKey = new Map();
+    const stockRowsByMerchant = new Map();
+    const stockKey = (merchantSkuId, warehouseId) => `${Number(merchantSkuId)}:${Number(warehouseId)}`;
+    const addStockRow = (row) => {
+        const normalized = {
+            ...row,
+            merchant_sku_id: Number(row.merchant_sku_id),
+            warehouse_id: Number(row.warehouse_id),
+            qty_available: Math.max(0, Number(row.qty_on_hand || 0) - Number(row.qty_reserved || 0)),
+        };
+        stockRows.push(normalized);
+        stockByWarehouseKey.set(stockKey(normalized.merchant_sku_id, normalized.warehouse_id), normalized);
+        const merchantRows = stockRowsByMerchant.get(normalized.merchant_sku_id) || [];
+        merchantRows.push(normalized);
+        stockRowsByMerchant.set(normalized.merchant_sku_id, merchantRows);
+    };
 
     if (skuIds.length > 0) {
         const stockRecords = await SkuWarehouseStock.findAll({
@@ -503,29 +542,75 @@ const syncInventory = async (user, data) => {
         }
 
 
-        // Map merchant_sku_id → qty_available for quick lookup
-        stockRecords.forEach((r) => {
-            stockMap[r.merchant_sku_id] = Math.max(0, Number(r.qty_on_hand || 0) - Number(r.qty_reserved || 0));
+        stockRecords.forEach(addStockRow);
+    } else {
+        const stockRecords = await SkuWarehouseStock.findAll({
+            where: { company_id: user.companyId },
+            attributes: ['id', 'merchant_sku_id', 'warehouse_id', 'qty_on_hand', 'qty_reserved'],
+            raw: true,
         });
+        stockRecords.forEach(addStockRow);
     }
 
-    const merchantSkuIds = Object.keys(stockMap).map(Number);
+    if (!stockRows.length) {
+        return {
+            queued: 0,
+            synced: 0,
+            failed: 0,
+            total: 0,
+            message: 'No matching inventory records found',
+            results: [],
+        };
+    }
+
+    const merchantSkuIds = [...new Set(stockRows.map((row) => row.merchant_sku_id))];
+    const selectedWarehouseIds = [...new Set(stockRows.map((row) => row.warehouse_id))];
 
     // ── Step 2: Find all active mappings for these merchant SKUs ─────────────
     const mappingWhere = {
         company_id: user.companyId,
         is_active: true,
         sync_status: { [Op.in]: ['pending', 'synced', 'failed', 'out_of_sync'] },
+        merchant_sku_id: { [Op.in]: merchantSkuIds },
+        [Op.or]: [
+            { fulfillment_warehouse_id: { [Op.in]: selectedWarehouseIds } },
+            { fulfillment_warehouse_id: null },
+        ],
     };
 
-    if (merchantSkuIds.length > 0) {
-        mappingWhere.merchant_sku_id = { [Op.in]: merchantSkuIds };
-    }
-
-    const mappings = await PlatformSkuMapping.findAll({
+    const candidateMappings = await PlatformSkuMapping.findAll({
         where: mappingWhere,
         raw: true,
     });
+
+    const exactMappingKeys = new Set(
+        candidateMappings
+            .filter((mapping) => mapping.fulfillment_warehouse_id !== null && mapping.fulfillment_warehouse_id !== undefined)
+            .map((mapping) => stockKey(mapping.merchant_sku_id, mapping.fulfillment_warehouse_id))
+    );
+
+    const mappings = candidateMappings.map((mapping) => {
+        const merchantSkuId = Number(mapping.merchant_sku_id);
+        const fulfillmentWarehouseId = mapping.fulfillment_warehouse_id !== null && mapping.fulfillment_warehouse_id !== undefined
+            ? Number(mapping.fulfillment_warehouse_id)
+            : null;
+
+        if (fulfillmentWarehouseId) {
+            const stockRow = stockByWarehouseKey.get(stockKey(merchantSkuId, fulfillmentWarehouseId));
+            return stockRow ? { ...mapping, sync_qty: stockRow.qty_available } : null;
+        }
+
+        const merchantStockRows = stockRowsByMerchant.get(merchantSkuId) || [];
+        const hasExactMappingForSelectedWarehouse = merchantStockRows.some((row) =>
+            exactMappingKeys.has(stockKey(row.merchant_sku_id, row.warehouse_id))
+        );
+
+        if (!hasExactMappingForSelectedWarehouse && merchantStockRows.length === 1) {
+            return { ...mapping, sync_qty: merchantStockRows[0].qty_available };
+        }
+
+        return null;
+    }).filter(Boolean);
 
     if (!mappings.length) {
         return {
@@ -540,7 +625,7 @@ const syncInventory = async (user, data) => {
 
     // ── Step 3: Call platform APIs concurrently ───────────────────────────────
     const results = await Promise.allSettled(
-        mappings.map((mapping) => callPlatformSyncApi(mapping, stockMap))
+        mappings.map((mapping) => callPlatformSyncApi(mapping))
     );
 
     // ── Step 4: Categorize results ────────────────────────────────────────────
@@ -630,9 +715,9 @@ const detectPlatform = (mapping) => {
 };
 
 // Route to correct platform API
-const callPlatformSyncApi = async (mapping, stockMap) => {
+const callPlatformSyncApi = async (mapping) => {
     const platform = detectPlatform(mapping);
-    const qty = stockMap[mapping.merchant_sku_id] ?? 0;
+    const qty = Number(mapping.sync_qty ?? 0);
 
     console.log(platform,qty,"-------------------------------Call----------------");
     
@@ -822,21 +907,42 @@ const updateInventoryStock = async (user, inventoryId, data = {}) => {
             }, { transaction });
         }
 
-        const [affectedRows] = await PlatformSkuMapping.update(
+        const mappingUpdateBase = {
+            company_id: user.companyId,
+            merchant_sku_id: stockRecord.merchant_sku_id,
+            is_active: true,
+            sync_status: { [Op.in]: ['pending', 'synced', 'failed', 'out_of_sync'] },
+        };
+
+        let [affectedRows] = await PlatformSkuMapping.update(
             {
                 sync_status: 'out_of_sync',
                 sync_error: null,
             },
             {
                 where: {
-                    company_id: user.companyId,
-                    merchant_sku_id: stockRecord.merchant_sku_id,
-                    is_active: true,
-                    sync_status: { [Op.in]: ['pending', 'synced', 'failed', 'out_of_sync'] },
+                    ...mappingUpdateBase,
+                    fulfillment_warehouse_id: stockRecord.warehouse_id,
                 },
                 transaction,
             },
         );
+
+        if (affectedRows === 0) {
+            [affectedRows] = await PlatformSkuMapping.update(
+                {
+                    sync_status: 'out_of_sync',
+                    sync_error: null,
+                },
+                {
+                    where: {
+                        ...mappingUpdateBase,
+                        fulfillment_warehouse_id: null,
+                    },
+                    transaction,
+                },
+            );
+        }
         markedOutOfSync = affectedRows;
 
         updatedItem = {

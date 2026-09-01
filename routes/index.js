@@ -6,11 +6,20 @@ const { requirePageAccess } = require('../utils/permissions');
 const { authenticate } = require('../middlewares/auth');
 const platformManualOrdersController = require('../modules/platformManualOrders/platformManualOrders.controller');
 
+const optionalAuthenticate = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return next();
+    return authenticate(req, res, next);
+};
+
 // ─── Apply general rate limiter to all /api/v1 routes ────────────────────────
 router.use(apiLimiter);
 
 // ─── Active modules ───────────────────────────────────────────────────────────
 router.use('/auth', require('../modules/auth/auth.routes'));
+router.use('/pricing', require('../modules/subscription/pricing.routes'));
+router.use('/subscription', authenticate, require('../modules/subscription/subscription.routes'));
+router.use('/admin', authenticate, require('../modules/adminManagement/adminManagement.routes'));
 
 // System configuration / account pages
 router.use('/users', authenticate, requirePageAccess('sub_account'), require('../modules/users/users.routes'));
@@ -33,18 +42,19 @@ router.use('/combine-skus', authenticate, requirePageAccess('combine_sku'), requ
 router.use('/inventory', authenticate, requirePageAccess('inventory_list'), require('../modules/inventory/inventory.routes'));
 router.use('/stock', authenticate, requirePageAccess('inventory_list'), require('../modules/stock/stock.routes'));
 router.use('/inbound', authenticate, requirePageAccess('inbound'), require('../modules/inbound/inbound.routes'));
-router.use('/outbound', authenticate, requirePageAccess('inbound'), require('../modules/outbound/outbound.routes'));
+router.use('/outbound', authenticate, requirePageAccess('outbound_order'), require('../modules/outbound/outbound.routes'));
 router.use('/order-management', authenticate, require('../modules/packFailedOrders/packFailedOrders.routes'));
 router.use('/order-management', authenticate, require('../modules/pushSuccessfulOrders/pushSuccessfulOrders.routes'));
 router.use('/order-management', authenticate, require('../modules/withdrawOrders/withdrawOrders.routes'));
+router.use('/order-management', authenticate, require('../modules/orderActivityLogs/orderActivityLogs.routes'));
 router.use('/order-management', authenticate, require('../modules/manualOrders/manualOrders.routes'));
 router.use('/auto-order-accept', authenticate, require('../modules/autoOrderAccept/autoOrderAccept.routes'));
-router.use('/platform-manual-orders', authenticate, require('../modules/platformManualOrders/platformManualOrders.routes'));
+router.use('/platform-manual-orders', authenticate, requirePageAccess('platform_manual_order'), require('../modules/platformManualOrders/platformManualOrders.routes'));
 router.use('/return-orders', authenticate, requirePageAccess('return_order'), require('../modules/returnOrders/returnOrders.routes'));
 
 // Marketplace order notifications. This route has its own API-key middleware
 // because Shopee/TikTok webhook workers do not use the ERP user JWT flow.
-router.use('/platform-order-deductions', require('../modules/platformOrderDeductions/platformOrderDeductions.routes'));
+router.use('/platform-order-deductions', optionalAuthenticate, require('../modules/platformOrderDeductions/platformOrderDeductions.routes'));
 
 // Platform / SKU mapping pages
 router.use('/platform-stores', authenticate, requirePageAccess('store_authorization'), require('../modules/platformStores/platformStores.routes'));

@@ -89,6 +89,27 @@ const manualReturnValidator = [
     body('lines.*.quantity').isInt({ min: 1 }).withMessage('quantity must be a positive integer'),
 ];
 
+const updateManualReturnValidator = [
+    ...idParam,
+    body('warehouseId').isInt({ min: 1 }).withMessage('warehouseId is required'),
+    body('platform').isIn(['shopee', 'tiktok']).withMessage('platform is required'),
+    body('platformStoreId').isInt({ min: 1 }).withMessage('platformStoreId is required'),
+    body('orderNumber').isString().trim().notEmpty().withMessage('orderNumber is required'),
+    body('returnId').optional().isString().trim(),
+    body('buyerUsername').optional().isString().trim(),
+    body('buyerEmail').optional().isString().trim(),
+    body('refundCurrency').optional().isString().trim(),
+    body('refundTotal').optional(),
+    body('returnReason').optional().isString().trim(),
+    body('returnReasonText').optional().isString().trim(),
+    body('returnType').optional().customSanitizer(normalizeReturnTypeInput).isIn(RETURN_TYPE_VALUES).withMessage('Invalid returnType'),
+    body('warehousePackageNo').optional().isString().trim(),
+    body('trackingNumber').optional().isString().trim(),
+    body('localReturnTrackingNo').optional().isString().trim(),
+    body('logisticName').optional().isString().trim(),
+    body('remark').optional().isString().trim(),
+];
+
 const manualReturnLookupValidator = [
     body('platform').isIn(['shopee', 'tiktok']).withMessage('platform is required'),
     body('platformStoreId').isInt({ min: 1 }).withMessage('platformStoreId is required'),
@@ -125,6 +146,7 @@ router.post('/sync/shopee', syncReturnValidator, ctrl.syncShopeeReturnOrders);
 router.post('/manual/order-lookup', manualReturnLookupValidator, ctrl.lookupManualReturnOrder);
 router.post('/manual', manualReturnValidator, ctrl.createManualReturnOrder);
 router.get('/:id', idParam, ctrl.getReturnOrderById);
+router.patch('/:id/manual', updateManualReturnValidator, ctrl.updateManualReturnOrder);
 router.patch('/:id/status', updateStatusValidator, ctrl.updateReturnStatus);
 router.delete('/:id', deleteValidator, ctrl.deleteReturnOrder);
 

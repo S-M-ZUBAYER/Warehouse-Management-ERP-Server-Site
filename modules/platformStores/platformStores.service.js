@@ -84,14 +84,20 @@ const getPlatformStores = async (user, filters = {}) => {
         offset,
     });
 
+    const data = await require('../subscription/subscription.service').appendSubscriptionSnapshots(rows);
+
     return {
-        data: rows,
+        data,
         pagination: { total: count, page: parseInt(page), limit: parseInt(limit), totalPages: Math.ceil(count / parseInt(limit)) },
     };
 };
 
 // ─── Get Single ────────────────────────────────────────────────────────────────
-const getPlatformStoreById = async (user, storeId) => assertStore(user, storeId);
+const getPlatformStoreById = async (user, storeId) => {
+    const store = await assertStore(user, storeId);
+    store.dataValues.subscription = await require('../subscription/subscription.service').getSubscriptionSnapshotForStore(store);
+    return store;
+};
 
 const getPlatformStoreByPlatformAndShopId = async (user, { platform, storeShopId }) => {
     const { PlatformStore, Warehouse } = require('../../models');
@@ -200,6 +206,7 @@ const createPlatformStore = async (user, data) => {
         created_by: user.userId,
     });
 
+    await require('../subscription/subscription.service').ensureStoreSubscription(store);
     await redis.flushByPattern(cacheKey(user.companyId, '*'));
     return getPlatformStoreById(user, store.id);
 };
@@ -264,6 +271,7 @@ const createPublicPlatformStore = async (data) => {
         created_by: companyId,
     });
 
+    await require('../subscription/subscription.service').ensureStoreSubscription(store);
     await redis.flushByPattern(cacheKey(companyId, '*'));
 
     return PlatformStore.findOne({
@@ -281,6 +289,7 @@ const createPublicPlatformStore = async (data) => {
 // Update
 const updatePlatformStore = async (user, storeId, data) => {
     const { PlatformStore } = require('../../models');
+    const subscriptionService = require('../subscription/subscription.service');
 
     const store = await PlatformStore.findOne({
         where: { id: storeId, company_id: user.companyId, deleted_at: null },
@@ -301,8 +310,29 @@ const updatePlatformStore = async (user, storeId, data) => {
     if (data.region !== undefined) updates.region = data.region;
     if (data.defaultWarehouseId !== undefined) updates.default_warehouse_id = data.defaultWarehouseId;
     if (data.isActive !== undefined) updates.is_active = toBool(data.isActive);
-    if (data.autoOrderAccept !== undefined) updates.auto_order_accept = toBool(data.autoOrderAccept);
-    if (data.auto_order_accept !== undefined) updates.auto_order_accept = toBool(data.auto_order_accept);
+    const requestedAutoOrderAccept =
+        data.autoOrderAccept !== undefined
+            ? toBool(data.autoOrderAccept)
+            : data.auto_order_accept !== undefined
+                ? toBool(data.auto_order_accept)
+                : undefined;
+    const subscriptionActive = await subscriptionService.isStoreSubscriptionActive(store);
+    if (requestedAutoOrderAccept === true && !subscriptionActive) {
+        const err = new Error('Cannot enable Auto Order Accept. Subscription expired for this store.');
+        err.statusCode = 403;
+        err.code = 'STORE_SUBSCRIPTION_EXPIRED';
+        throw err;
+    }
+    if (requestedAutoOrderAccept !== undefined) updates.auto_order_accept = subscriptionActive ? requestedAutoOrderAccept : false;
+    if (requestedAutoOrderAccept === undefined && !subscriptionActive && store.auto_order_accept) updates.auto_order_accept = false;
+    const requestedAutoOrderAcceptDays =
+        data.autoOrderAcceptDays !== undefined || data.auto_order_accept_days !== undefined;
+    if (requestedAutoOrderAcceptDays && !subscriptionActive) {
+        const err = new Error('Cannot edit Auto Process Days. Subscription expired for this store.');
+        err.statusCode = 403;
+        err.code = 'STORE_SUBSCRIPTION_EXPIRED';
+        throw err;
+    }
     if (data.autoOrderAcceptDays !== undefined) updates.auto_order_accept_days = normalizeAutoOrderAcceptDays(data.autoOrderAcceptDays);
     if (data.auto_order_accept_days !== undefined) updates.auto_order_accept_days = normalizeAutoOrderAcceptDays(data.auto_order_accept_days);
     if (data.webhookSecret !== undefined) updates.webhook_secret = data.webhookSecret;

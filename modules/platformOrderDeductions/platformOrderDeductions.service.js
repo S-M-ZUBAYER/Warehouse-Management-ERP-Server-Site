@@ -3,6 +3,7 @@
 const axios = require('axios');
 const { Op } = require('sequelize');
 const stockService = require('../stock/stock.service');
+const activityLogService = require('../orderActivityLogs/orderActivityLogs.service');
 
 const normalizeBaseUrl = (value) => String(value || '').replace(/\/+$/, '');
 const JAVA_API_BASE_URL = normalizeBaseUrl(process.env.JAVA_API_URL || 'https://grozziie.zjweiting.com:3091');
@@ -39,6 +40,62 @@ const buildStoreWhere = (data) => {
         is_active: true,
         ...(storeFilters.length ? { [Op.or]: storeFilters } : {}),
     };
+};
+
+const getActivityStoreId = (data = {}, mapping = {}) => (
+    normalizeString(data.externalStoreId) ||
+    normalizeString(data.shopId) ||
+    normalizeString(data.openId) ||
+    normalizeString(data.cipherId) ||
+    normalizeString(mapping.platform_shop_id) ||
+    normalizeString(mapping.platform_open_id) ||
+    normalizeString(mapping.platform_cipher_id) ||
+    null
+);
+
+const getActivitySourceEventId = (data = {}, mapping = {}, eventType = 'ORDER_ACTIVITY') => (
+    normalizeString(data.sourceEventId) ||
+    normalizeString(data.eventId) ||
+    `${data.platform}:${eventType}:${mapping.id || 'mapping'}:${data.platformOrderId || 'order'}:${data.platformOrderItemId || 'item'}`
+);
+
+const logPlatformOrderActivity = async ({ data, mapping, companyId, eventType, title, message, oldStatus = null, newStatus = null, actor = {}, metadata = {} }) => {
+    const actorType = actor.actorType || 'WEBHOOK';
+    const fallbackActorName = actorType === 'USER' ? 'ERP User' : `${String(data.platform || '').toUpperCase()} Webhook`;
+
+    return activityLogService.safeCreateActivityLog({
+        companyId,
+        platform: data.platform,
+        platformStoreId: mapping.platform_store_id || null,
+        storeId: getActivityStoreId(data, mapping),
+        platformOrderId: data.platformOrderId,
+        platformOrderItemId: data.platformOrderItemId || null,
+        packageNumber: data.packageNumber || data.packageId || null,
+        trackingNumber: data.trackingNumber || data.awbNumber || null,
+        eventType,
+        title,
+        message,
+        oldStatus,
+        newStatus,
+        actorType,
+        actorId: actor.userId || actor.actorId || null,
+        actorName: actor.actorName || actor.name || fallbackActorName,
+        source: actor.source || (actorType === 'USER' ? 'ERP_USER_ACTION' : `${String(data.platform || '').toUpperCase()}_WEBHOOK`),
+        sourceEventId: actorType === 'USER' ? null : getActivitySourceEventId(data, mapping, eventType),
+        metadata: {
+            platformMappingId: mapping.id,
+            quantitySold: Number(data.quantitySold || 0) || undefined,
+            itemId: data.itemId || undefined,
+            modelId: data.modelId || undefined,
+            skuId: data.skuId || undefined,
+            productId: data.productId || undefined,
+            ...metadata,
+        },
+    }, {
+        actorType,
+        userId: actor.userId || actor.actorId || null,
+        name: actor.actorName || actor.name || fallbackActorName,
+    });
 };
 
 const buildMappingWhere = (data, platformStoreId = null) => {
@@ -145,7 +202,7 @@ const resolvePlatformMapping = async (data) => {
                 model: PlatformStore,
                 as: 'platformStore',
                 where: { platform: data.platform },
-                attributes: ['id', 'platform'],
+                attributes: ['id', 'platform', 'external_store_id', 'store_shop_id'],
             }],
         });
 
@@ -162,7 +219,7 @@ const resolvePlatformMapping = async (data) => {
 
     const store = await PlatformStore.findOne({
         where: buildStoreWhere(data),
-        attributes: ['id', 'platform'],
+        attributes: ['id', 'platform', 'external_store_id', 'store_shop_id'],
     });
 
     if (!store) {
@@ -173,6 +230,13 @@ const resolvePlatformMapping = async (data) => {
 
     const mappings = await PlatformSkuMapping.findAll({
         where: buildMappingWhere(data, store.id),
+        include: [{
+            model: PlatformStore,
+            as: 'platformStore',
+            where: { id: store.id, platform: data.platform },
+            attributes: ['id', 'platform', 'external_store_id', 'store_shop_id'],
+            required: true,
+        }],
         limit: 2,
     });
 
@@ -793,6 +857,14 @@ const callPlatformIncreaseStock = (mapping, platform, increaseQty) => (
         : callShopeeIncreaseStock(mapping, increaseQty)
 );
 
+const isWebhookNotificationActor = (actor = {}) => !(
+    actor.userId ||
+    actor.id ||
+    actor.actorId ||
+    actor.actorType === 'USER' ||
+    actor.source
+);
+
 const pushRelatedPlatformStock = async ({ companyId, merchantSkuIds, combineSkuId, platform }) => {
     const { PlatformSkuMapping, PlatformStore } = require('../../models');
     const conditions = [];
@@ -981,6 +1053,136 @@ const findPlatformProductForMapping = async (mapping, platform) => {
         },
         order: [['updated_at', 'DESC'], ['id', 'DESC']],
     });
+};
+
+const pushMatchedPlatformStockReduction = async ({ mapping, platform, quantity }) => {
+    const reduceQty = Number(quantity);
+    const result = await callPlatformReduceStock(mapping, platform, reduceQty);
+
+    if (result.success) {
+        if (result.newQuantity !== null && result.newQuantity !== undefined) {
+            const platformProduct = await findPlatformProductForMapping(mapping, platform);
+            if (platformProduct) {
+                await platformProduct.update({
+                    platform_stock: Math.max(0, Number(result.newQuantity || 0)),
+                    synced_at: new Date(),
+                });
+            }
+        }
+    }
+
+    return {
+        total: 1,
+        synced: result.success ? 1 : 0,
+        failed: result.success ? 0 : 1,
+        results: [{
+            mappingId: mapping.id,
+            merchantSkuId: mapping.merchant_sku_id,
+            combineSkuId: mapping.combine_sku_id,
+            reduced: reduceQty,
+            platformStockBefore: result.previousQuantity ?? null,
+            platformStockAfter: result.newQuantity ?? null,
+            success: result.success,
+            error: result.error || null,
+            skipped: Boolean(result.skipped),
+        }],
+    };
+};
+
+const findSiblingPlatformSkuMappings = async (sourceMapping) => {
+    const { PlatformSkuMapping, PlatformStore } = require('../../models');
+    const companyId = Number(sourceMapping.company_id);
+    const sourceMappingId = Number(sourceMapping.id);
+    const warehouseId = Number(sourceMapping.fulfillment_warehouse_id);
+    const merchantSkuId = Number(sourceMapping.merchant_sku_id);
+    const combineSkuId = Number(sourceMapping.combine_sku_id);
+    const skuCondition = Number.isInteger(merchantSkuId) && merchantSkuId > 0
+        ? { merchant_sku_id: merchantSkuId }
+        : Number.isInteger(combineSkuId) && combineSkuId > 0
+            ? { combine_sku_id: combineSkuId }
+            : null;
+
+    if (
+        !Number.isInteger(companyId) ||
+        companyId <= 0 ||
+        !Number.isInteger(sourceMappingId) ||
+        sourceMappingId <= 0 ||
+        !Number.isInteger(warehouseId) ||
+        warehouseId <= 0 ||
+        !skuCondition
+    ) {
+        return [];
+    }
+
+    return PlatformSkuMapping.findAll({
+        where: {
+            company_id: companyId,
+            id: { [Op.ne]: sourceMappingId },
+            fulfillment_warehouse_id: warehouseId,
+            is_active: true,
+            ...skuCondition,
+        },
+        include: [{
+            model: PlatformStore,
+            as: 'platformStore',
+            where: {
+                platform: { [Op.in]: ['shopee', 'tiktok'] },
+                is_active: true,
+            },
+            attributes: ['id', 'platform', 'external_store_id', 'store_shop_id'],
+            required: true,
+        }],
+    });
+};
+
+const pushSiblingPlatformStockChange = async ({ sourceMapping, quantity, action }) => {
+    const changeQty = Number(quantity);
+
+    if (!Number.isFinite(changeQty) || changeQty <= 0) {
+        return { total: 0, synced: 0, failed: 0, results: [] };
+    }
+
+    const mappings = await findSiblingPlatformSkuMappings(sourceMapping);
+    if (!mappings.length) return { total: 0, synced: 0, failed: 0, results: [] };
+
+    const results = await Promise.all(mappings.map(async (mapping) => {
+        const platform = normalizeString(mapping.platformStore?.platform)?.toLowerCase();
+        const result = action === 'increase'
+            ? await callPlatformIncreaseStock(mapping, platform, changeQty)
+            : await callPlatformReduceStock(mapping, platform, changeQty);
+
+        if (result.success && result.newQuantity !== null && result.newQuantity !== undefined) {
+            const platformProduct = await findPlatformProductForMapping(mapping, platform);
+            if (platformProduct) {
+                await platformProduct.update({
+                    platform_stock: Math.max(0, Number(result.newQuantity || 0)),
+                    synced_at: new Date(),
+                });
+            }
+        }
+
+        return {
+            mappingId: mapping.id,
+            sourceMappingId: sourceMapping.id,
+            merchantSkuId: mapping.merchant_sku_id,
+            combineSkuId: mapping.combine_sku_id,
+            fulfillmentWarehouseId: mapping.fulfillment_warehouse_id,
+            platform,
+            [action === 'increase' ? 'increased' : 'reduced']: changeQty,
+            platformStockBefore: result.previousQuantity ?? null,
+            platformStockAfter: result.newQuantity ?? null,
+            success: result.success,
+            error: result.error || null,
+            skipped: Boolean(result.skipped),
+        };
+    }));
+
+    return {
+        total: results.length,
+        synced: results.filter((result) => result.success).length,
+        failed: results.filter((result) => !result.success).length,
+        results,
+    };
 };
 
 const aggregateManualOrderDeductions = (items = []) => {
@@ -1291,12 +1493,57 @@ const deductFromOrderNotification = async (platform, payload, actor = {}) => {
         quantitySold: Number(data.quantitySold),
     });
 
-    const { sync, platformStockSync } = await afterStockChangeSync({
+    const noStockChange = deduction.alreadyDeducted || deduction.alreadyReserved;
+    const affectedMerchantSkuIds = [
+        mapping.merchant_sku_id,
+        ...(deduction.deductions || []).map((item) => item.merchantSkuId),
+    ].filter(Boolean);
+    let sync = { markedCount: 0, merchantSkuIds: [] };
+    let platformStockSync = null;
+
+    if (!noStockChange) {
+        sync = {
+            markedCount: 0,
+            merchantSkuIds: [...new Set(affectedMerchantSkuIds.map((id) => Number(id)).filter(Boolean))],
+        };
+
+        platformStockSync = ['shopee', 'tiktok'].includes(data.platform)
+            ? isWebhookNotificationActor(actor)
+                ? await pushSiblingPlatformStockChange({
+                    sourceMapping: mapping,
+                    quantity: Number(data.quantitySold),
+                    action: 'reduce',
+                })
+                : await pushMatchedPlatformStockReduction({
+                    mapping,
+                    platform: data.platform,
+                    quantity: Number(data.quantitySold),
+                })
+            : null;
+    }
+
+    await logPlatformOrderActivity({
         data,
         mapping,
         companyId,
-        stockResult: deduction,
-        skipWhenAlready: true,
+        eventType: 'ORDER_STOCK_RESERVED',
+        title: deduction.alreadyDeducted || deduction.alreadyReserved
+            ? 'Order stock reservation already existed'
+            : 'Order stock reserved',
+        message: deduction.alreadyDeducted
+            ? 'Order item was already packed, so no new reservation was created.'
+            : deduction.alreadyReserved
+                ? 'Order item reservation was already recorded.'
+                : 'Platform order notification reserved ERP stock for this order item.',
+        newStatus: deduction.alreadyDeducted ? 'PACKED' : 'RESERVED',
+        actor,
+        metadata: {
+            alreadyDeducted: Boolean(deduction.alreadyDeducted),
+            alreadyReserved: Boolean(deduction.alreadyReserved),
+            syncMarkedOutOfSync: sync.markedCount,
+            affectedMerchantSkuIds: sync.merchantSkuIds,
+            platformStockSync,
+        },
     });
 
     return {
@@ -1330,6 +1577,18 @@ const cancelReservedOrderNotification = async (platform, payload, actor = {}) =>
     const saleLine = await OrderSaleLine.findOne({ where: saleLineWhereClause });
 
     if (saleLine?.deducted) {
+        await logPlatformOrderActivity({
+            data,
+            mapping,
+            companyId,
+            eventType: 'ORDER_CANCEL_IGNORED',
+            title: 'Cancel notification ignored',
+            message: 'Reserved stock could not be released because this order item was already packed.',
+            newStatus: 'PACKED',
+            actor,
+            metadata: { alreadyDeducted: true },
+        });
+
         return {
             alreadyDeducted: true,
             alreadyPacked: true,
@@ -1363,6 +1622,18 @@ const cancelReservedOrderNotification = async (platform, payload, actor = {}) =>
     );
 
     if (!saleLine && !activeAdjustments.length) {
+        await logPlatformOrderActivity({
+            data,
+            mapping,
+            companyId,
+            eventType: 'ORDER_CANCEL_ALREADY_RELEASED',
+            title: 'Order reservation already released',
+            message: 'Cancel notification was received, but no active reservation remained for this order item.',
+            newStatus: 'CANCELLED',
+            actor,
+            metadata: { alreadyReleased: true },
+        });
+
         return {
             alreadyReleased: true,
             alreadyDeducted: false,
@@ -1376,12 +1647,13 @@ const cancelReservedOrderNotification = async (platform, payload, actor = {}) =>
     }
 
     const increaseQty = Number(saleLine?.quantity_sold || data.quantitySold || 1);
-    const platformStockIncrease = await callPlatformIncreaseStock(mapping, data.platform, increaseQty) || {
-        success: false,
-        error: 'Platform stock increase returned no response',
-    };
-    if (!platformStockIncrease.success) {
-        const err = new Error(platformStockIncrease.error || 'Platform stock increase failed');
+    const platformStockIncrease = await pushSiblingPlatformStockChange({
+        sourceMapping: mapping,
+        quantity: increaseQty,
+        action: 'increase',
+    });
+    if (platformStockIncrease.failed > 0) {
+        const err = new Error('One or more sibling platform stock increases failed');
         err.statusCode = 502;
         err.details = platformStockIncrease;
         throw err;
@@ -1470,23 +1742,21 @@ const cancelReservedOrderNotification = async (platform, payload, actor = {}) =>
         combineSkuId: mapping.combine_sku_id || null,
     });
 
-    const updates = [
-        mapping.update({
-            sync_status: 'synced',
-            last_synced_at: new Date(),
-            sync_error: null,
-        }),
-    ];
-    if (platformStockIncrease.newQuantity !== null && platformStockIncrease.newQuantity !== undefined) {
-        const platformProduct = await findPlatformProductForMapping(mapping, data.platform);
-        if (platformProduct) {
-            updates.push(platformProduct.update({
-                platform_stock: Math.max(0, Number(platformStockIncrease.newQuantity || 0)),
-                synced_at: new Date(),
-            }));
-        }
-    }
-    await Promise.all(updates);
+    await logPlatformOrderActivity({
+        data,
+        mapping,
+        companyId,
+        eventType: 'ORDER_CANCELLED',
+        title: 'Order cancelled',
+        message: 'Platform cancel notification released reserved ERP stock for this order item.',
+        oldStatus: 'RESERVED',
+        newStatus: 'CANCELLED',
+        actor,
+        metadata: {
+            releasedReservations,
+            platformStockIncrease,
+        },
+    });
 
     return {
         alreadyReleased: false,
@@ -1614,13 +1884,40 @@ const packFromOrderNotification = async (platform, payload, actor = {}) => {
         await skuOverride.update({ status: 'packed', packed_at: skuOverride.packed_at || new Date() });
     }
 
-    const { sync, platformStockSync } = await afterStockChangeSync({
+    const inventoryOnlyPack = actor.source === 'ERP_PACK_ACTION' || isWebhookNotificationActor(actor);
+    const { sync, platformStockSync } = inventoryOnlyPack
+        ? { sync: { markedCount: 0, merchantSkuIds: [] }, platformStockSync: null }
+        : await afterStockChangeSync({
+            data,
+            mapping,
+            companyId,
+            stockResult: packed,
+            skipWhenAlready: true,
+            useReduceApi: true,
+        });
+
+    await logPlatformOrderActivity({
         data,
         mapping,
         companyId,
-        stockResult: packed,
-        skipWhenAlready: true,
-        useReduceApi: true,
+        eventType: 'ORDER_PACKED',
+        title: packed.alreadyPacked || packed.alreadyDeducted ? 'Order already packed' : 'Order packed',
+        message: packed.alreadyPacked || packed.alreadyDeducted
+            ? 'Pack notification was received, but this order item was already packed.'
+            : 'Reserved stock was finalized/deducted for this order item.',
+        oldStatus: 'RESERVED',
+        newStatus: 'PACKED',
+        actor,
+        metadata: {
+            alreadyPacked: Boolean(packed.alreadyPacked),
+            alreadyDeducted: Boolean(packed.alreadyDeducted),
+            skuOverrideId: skuOverride?.id || null,
+            overrideApplied: Boolean(skuOverride),
+            addSkuAdjustmentsPacked: addSkuPackResults,
+            syncMarkedOutOfSync: sync.markedCount,
+            affectedMerchantSkuIds: sync.merchantSkuIds,
+            platformStockSync,
+        },
     });
 
     return {
@@ -1683,7 +1980,7 @@ const finalizePackedOrderNotification = async (body, actor = {}) => {
     return { count: results.length, results };
 };
 
-const savePlatformOrderItemSkuOverride = async (body) => {
+const savePlatformOrderItemSkuOverride = async (body, actor = {}) => {
     const { sequelize, CombineSku, CombineSkuItem, MerchantSku, OrderSaleLine, PlatformOrderItemSkuOverride, SkuWarehouseStock, Warehouse } = require('../../models');
     const platform = normalizeString(body.platform)?.toLowerCase();
     if (!['shopee', 'tiktok'].includes(platform)) {
@@ -1930,6 +2227,30 @@ const savePlatformOrderItemSkuOverride = async (body) => {
         combineSkuId: hasCombineSku ? replacementCombineSkuId : null,
     });
 
+    await logPlatformOrderActivity({
+        data,
+        mapping,
+        companyId,
+        eventType: adjustmentType === 'add' ? 'ORDER_SKU_ADDED' : 'ORDER_SKU_EXCHANGED',
+        title: adjustmentType === 'add' ? 'Order SKU added' : 'Order SKU exchanged',
+        message: adjustmentType === 'add'
+            ? 'A user added an extra SKU line for this platform order.'
+            : 'A user changed the SKU allocation for this platform order item.',
+        newStatus: 'SKU_ADJUSTED',
+        actor,
+        metadata: {
+            adjustmentId: override.id,
+            adjustmentType: override.adjustment_type,
+            replacementMerchantSkuId: override.replacement_merchant_sku_id,
+            replacementCombineSkuId: override.replacement_combine_sku_id,
+            replacementWarehouseId: override.replacement_warehouse_id,
+            quantity: override.quantity,
+            sourceTab: override.source_tab,
+            displaySection: override.display_section,
+            reason: override.reason,
+        },
+    });
+
     return {
         id: override.id,
         platform: override.platform,
@@ -2062,7 +2383,7 @@ const listPlatformOrderSkuAdjustments = async (query = {}) => {
     return rows.map(serializeSkuAdjustment);
 };
 
-const deletePlatformOrderSkuOverrides = async (body) => {
+const deletePlatformOrderSkuOverrides = async (body, actor = {}) => {
     const { sequelize, CombineSkuItem, OrderSaleLine, PlatformOrderItemSkuOverride, PlatformSkuMapping, SkuWarehouseStock } = require('../../models');
     const platform = normalizeString(body.platform)?.toLowerCase();
     if (!['shopee', 'tiktok'].includes(platform)) {
@@ -2096,6 +2417,7 @@ const deletePlatformOrderSkuOverrides = async (body) => {
 
     const affectedSkuIds = [];
     const affectedCompanyIds = new Set();
+    const deletedLogs = [];
     let deletedCount = 0;
 
     await sequelize.transaction(async (transaction) => {
@@ -2122,12 +2444,13 @@ const deletePlatformOrderSkuOverrides = async (body) => {
                 transaction,
             }));
 
+            const mapping = await PlatformSkuMapping.findOne({
+                where: { id: adjustment.original_platform_mapping_id, company_id: companyId },
+                lock: transaction.LOCK.UPDATE,
+                transaction,
+            });
+
             if (adjustment.adjustment_type === 'exchange') {
-                const mapping = await PlatformSkuMapping.findOne({
-                    where: { id: adjustment.original_platform_mapping_id, company_id: companyId },
-                    lock: transaction.LOCK.UPDATE,
-                    transaction,
-                });
                 const saleLine = await OrderSaleLine.findOne({
                     where: {
                         platform_sku_mapping_id: adjustment.original_platform_mapping_id,
@@ -2164,6 +2487,30 @@ const deletePlatformOrderSkuOverrides = async (body) => {
             }
 
             await adjustment.destroy({ transaction });
+            deletedLogs.push({
+                companyId,
+                data: {
+                    ...data,
+                    platformOrderItemId: adjustment.platform_order_item_id,
+                },
+                mapping: mapping || {
+                    id: adjustment.original_platform_mapping_id,
+                    platform_store_id: adjustment.platform_store_id,
+                    platform_shop_id: adjustment.shop_id,
+                    platform_open_id: adjustment.open_id,
+                    platform_cipher_id: adjustment.cipher_id,
+                },
+                adjustment: {
+                    id: adjustment.id,
+                    adjustmentType: adjustment.adjustment_type,
+                    replacementMerchantSkuId: adjustment.replacement_merchant_sku_id,
+                    replacementCombineSkuId: adjustment.replacement_combine_sku_id,
+                    replacementWarehouseId: adjustment.replacement_warehouse_id,
+                    quantity: adjustment.quantity,
+                    sourceTab: adjustment.source_tab,
+                    displaySection: adjustment.display_section,
+                },
+            });
             deletedCount += 1;
         }
     });
@@ -2172,6 +2519,20 @@ const deletePlatformOrderSkuOverrides = async (body) => {
         for (const companyId of affectedCompanyIds) {
             await recomputeAffectedCombineSkus({ CombineSkuItem, companyId, merchantSkuIds: affectedSkuIds }).catch(() => null);
         }
+    }
+
+    for (const deleted of deletedLogs) {
+        await logPlatformOrderActivity({
+            data: deleted.data,
+            mapping: deleted.mapping,
+            companyId: deleted.companyId,
+            eventType: 'ORDER_SKU_ADJUSTMENT_DELETED',
+            title: 'Order SKU adjustment deleted',
+            message: 'A user deleted an active SKU adjustment for this platform order.',
+            newStatus: 'SKU_ADJUSTMENT_DELETED',
+            actor,
+            metadata: deleted.adjustment,
+        });
     }
 
     return {

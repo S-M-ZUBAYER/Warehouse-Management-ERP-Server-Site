@@ -64,7 +64,12 @@ const finalizePackedOrderNotification = async (req, res, next) => {
             );
         }
 
-        const result = await service.finalizePackedOrderNotification(req.body);
+        const result = await service.finalizePackedOrderNotification(req.body, {
+            actorType: 'USER',
+            userId: req.user?.userId,
+            name: req.user?.name || req.user?.email,
+            source: 'ERP_PACK_ACTION',
+        });
         return sendSuccess(res, 'Packed stock finalized', result);
     } catch (err) {
         next(err);
@@ -83,7 +88,12 @@ const savePlatformOrderItemSkuOverride = async (req, res, next) => {
             );
         }
 
-        const result = await service.savePlatformOrderItemSkuOverride(req.body);
+        const result = await service.savePlatformOrderItemSkuOverride(req.body, {
+            actorType: 'USER',
+            userId: req.user?.userId,
+            name: req.user?.name || req.user?.email,
+            source: 'ERP_SKU_ADJUSTMENT',
+        });
         return sendSuccess(res, 'Platform order item SKU override saved', result);
     } catch (err) {
         next(err);
@@ -111,7 +121,12 @@ const deletePlatformOrderSkuOverrides = async (req, res, next) => {
             );
         }
 
-        const result = await service.deletePlatformOrderSkuOverrides(req.body);
+        const result = await service.deletePlatformOrderSkuOverrides(req.body, {
+            actorType: 'USER',
+            userId: req.user?.userId,
+            name: req.user?.name || req.user?.email,
+            source: 'ERP_SKU_ADJUSTMENT',
+        });
         return sendSuccess(res, 'Platform order SKU overrides deleted', result);
     } catch (err) {
         next(err);

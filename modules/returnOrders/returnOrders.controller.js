@@ -106,6 +106,16 @@ const updateReturnStatus = async (req, res, next) => {
     }
 };
 
+const updateManualReturnOrder = async (req, res, next) => {
+    try {
+        if (validationErrorResponse(req, res)) return null;
+        const result = await service.updateManualReturnOrder(req.user, req.params.id, req.body);
+        return sendSuccess(res, 'Manual return order updated successfully', result);
+    } catch (err) {
+        return next(err);
+    }
+};
+
 const deleteReturnOrder = async (req, res, next) => {
     try {
         if (validationErrorResponse(req, res)) return null;
@@ -124,6 +134,7 @@ module.exports = {
     getSyncStatus,
     lookupManualReturnOrder,
     createManualReturnOrder,
+    updateManualReturnOrder,
     updateReturnStatus,
     deleteReturnOrder,
 };

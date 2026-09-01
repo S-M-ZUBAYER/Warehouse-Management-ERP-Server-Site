@@ -104,6 +104,7 @@ const listMerchantSkuValidator = [
     query('limit').optional().isInt({ min: 1, max: 100 }),
     query('search').optional().trim(),
     query('warehouseId').optional().isInt({ min: 1 }),
+    query('stockWarehouseId').optional().isInt({ min: 1 }),
     query('status').optional().isIn(['active', 'inactive', 'all', 'in_stock', 'out_of_stock']),
     query('country').optional().trim(),
     query('sortBy').optional().isIn(['created_at', 'updated_at', 'sku_name', 'sku_title']),

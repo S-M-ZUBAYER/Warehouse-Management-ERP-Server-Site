@@ -46,11 +46,12 @@ CREATE TABLE IF NOT EXISTS `pages` (
 -- ── Level 1: Top-level pages ──────────────────────────────────────────────────
 INSERT INTO `pages` (`key`, `label`, `parent_id`, `level`, `has_sub`, `order`) VALUES
 ('dashboard',            'Dashboard',            NULL, 1, 0, 0),
-('product_management',   'Product Management',   NULL, 1, 1, 1),
-('inventory_management', 'Inventory Management', NULL, 1, 1, 2),
-('order_management',     'Order Management',     NULL, 1, 1, 3),
-('warehouse_management', 'Warehouse Management', NULL, 1, 0, 4),
-('system_configuration', 'System Configuration', NULL, 1, 1, 5);
+('contact',              'Contact',              NULL, 1, 0, 1),
+('product_management',   'Product Management',   NULL, 1, 1, 2),
+('inventory_management', 'Inventory Management', NULL, 1, 1, 3),
+('order_management',     'Order Management',     NULL, 1, 1, 4),
+('warehouse_management', 'Warehouse Management', NULL, 1, 0, 5),
+('system_configuration', 'System Configuration', NULL, 1, 1, 6);
 
 
 -- ── Level 2: Sub-pages ────────────────────────────────────────────────────────
@@ -73,7 +74,8 @@ INSERT INTO `pages` (`key`, `label`, `parent_id`, `level`, `has_sub`, `order`) V
 -- Order Management → sub
 INSERT INTO `pages` (`key`, `label`, `parent_id`, `level`, `has_sub`, `order`) VALUES
 ('order_processing', 'Order Processing', (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_management') AS t), 2, 1, 0),
-('manual_order',     'Manual Order',     (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_management') AS t), 2, 0, 1);
+('manual_order',     'Manual Order',     (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_management') AS t), 2, 0, 1),
+('platform_manual_order', 'Platform Manual Order', (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_management') AS t), 2, 0, 2);
 
 -- System Configuration → sub
 INSERT INTO `pages` (`key`, `label`, `parent_id`, `level`, `has_sub`, `order`) VALUES

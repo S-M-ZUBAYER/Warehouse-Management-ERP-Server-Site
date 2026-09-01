@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize) => {
@@ -70,6 +70,12 @@ module.exports = (sequelize) => {
         cod_payout_reference: { type: DataTypes.STRING(150), allowNull: true },
         cod_settlement_note: { type: DataTypes.TEXT, allowNull: true },
         platform_fee: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
+        shipping_wallet_ledger_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
+        shipping_wallet_status: { type: DataTypes.STRING(40), allowNull: true },
+        shipping_charge_myr: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
+        shipping_charge_original_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
+        shipping_charge_original_currency: { type: DataTypes.STRING(10), allowNull: true },
+        shipping_fx_rate_to_myr: { type: DataTypes.DECIMAL(18, 8), allowNull: true },
         payment_certificate_url: { type: DataTypes.TEXT('long'), allowNull: true },
         payment_certificate_filename: { type: DataTypes.STRING(255), allowNull: true },
         order_time: { type: DataTypes.DATE, allowNull: true },
@@ -107,3 +113,4 @@ module.exports = (sequelize) => {
 
     return ManualOrder;
 };
+

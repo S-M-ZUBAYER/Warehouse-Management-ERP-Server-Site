@@ -10,6 +10,7 @@ const {
     getPermittedStoreIds,
 } = require('../../utils/permissions');
 const platformOrderDeductionsService = require('../platformOrderDeductions/platformOrderDeductions.service');
+const { assertStoreSubscriptionActive } = require('../subscription/subscription.service');
 
 const JAVA_API_BASE_URL = process.env.JAVA_API_URL 
     .replace(/\/+$/, '');
@@ -33,6 +34,14 @@ const RETURN_ORDER_ACTIVE_SYNC_DAYS = Math.max(
 const SHOPEE_RETURN_FIRST_SYNC_DAYS = Math.max(
     1,
     Number.parseInt(process.env.SHOPEE_RETURN_FIRST_SYNC_DAYS || String(RETURN_ORDER_ACTIVE_SYNC_DAYS), 10) || RETURN_ORDER_ACTIVE_SYNC_DAYS
+);
+const SHOPEE_RETURN_RECENT_SYNC_DAYS = Math.max(
+    1,
+    Number.parseInt(process.env.SHOPEE_RETURN_RECENT_SYNC_DAYS || String(RETURN_ORDER_ACTIVE_SYNC_DAYS), 10) || RETURN_ORDER_ACTIVE_SYNC_DAYS
+);
+const SHOPEE_RETURN_SYNC_WINDOW_DAYS = Math.min(
+    10,
+    Math.max(1, Number.parseInt(process.env.SHOPEE_RETURN_SYNC_WINDOW_DAYS || '10', 10) || 10)
 );
 const TIKTOK_RETURN_SYNC_MAX_PAGES = Math.max(
     1,
@@ -104,6 +113,11 @@ const getErrorMessage = (err) => {
     if (err?.response?.status) return `HTTP ${err.response.status}${err.response.statusText ? ` ${err.response.statusText}` : ''}`;
     if (err?.code) return clean(`${err.code}${err.message ? `: ${err.message}` : ''}`);
     return clean(err?.message) || 'Unknown error';
+};
+
+const isAutoManualReturnId = (value) => {
+    const normalized = clean(value).toLowerCase();
+    return normalized.startsWith('manual-shopee-') || normalized.startsWith('manual-tiktok-');
 };
 
 const getResponsePreview = (data) => {
@@ -215,6 +229,37 @@ const buildSearchCondition = async (companyId, filters = {}) => {
     return {
         [Op.or]: likeConditions(['platform_return_id'], terms),
     };
+};
+
+const appendAndCondition = (where, condition) => {
+    where[Op.and] = [
+        ...(where[Op.and] || []),
+        condition,
+    ];
+};
+
+const getUsableReturnOrderStoreIds = async (user, filters = {}) => {
+    const { PlatformStore } = require('../../models');
+    const companyId = getUserCompanyId(user);
+    const where = {
+        company_id: companyId,
+        is_active: true,
+        deleted_at: null,
+    };
+    if (['shopee', 'tiktok'].includes(filters.platform)) where.platform = filters.platform;
+    if (filters.storeId && filters.storeId !== 'all') where.id = Number(filters.storeId);
+
+    const stores = await PlatformStore.findAll({ where });
+    const usableStoreIds = [];
+    for (const store of stores) {
+        try {
+            await assertStoreSubscriptionActive(store, 'return order operations');
+            usableStoreIds.push(Number(store.id));
+        } catch {
+            // Expired stores are intentionally hidden from the return order list.
+        }
+    }
+    return usableStoreIds;
 };
 
 const toPositiveInt = (value, fieldName) => {
@@ -343,6 +388,23 @@ const getOptionDateRange = (options = {}, fallbackDays = 7) => {
     if (start && !end) return { start, end: Math.floor(Date.now() / 1000) };
     if (!start && end) return { start: end - Math.max(1, Number(options.days) || fallbackDays) * SECONDS_IN_DAY, end };
     return getUnixDateRange(options.days || fallbackDays);
+};
+
+const splitUnixDateRange = (range, windowDays) => {
+    const start = toUnixSecond(range?.start);
+    const end = toUnixSecond(range?.end);
+    const maxSpan = Math.max(1, Number(windowDays) || 1) * SECONDS_IN_DAY;
+    if (!start || !end || start >= end) return start && end ? [{ start, end }] : [];
+
+    const windows = [];
+    let cursor = start;
+    while (cursor < end) {
+        const windowEnd = Math.min(cursor + maxSpan, end);
+        windows.push({ start: cursor, end: windowEnd });
+        if (windowEnd >= end) break;
+        cursor = windowEnd;
+    }
+    return windows;
 };
 
 const getListDateCondition = (filters = {}) => {
@@ -1292,7 +1354,7 @@ const callTikTokReturnsSearch = async ({ store, days = 7, startDate, endDate, pa
     return { rows, skipped: false, range, pagesFetched: page, nextPageToken };
 };
 
-const callShopeeReturnsList = async ({ companyId, store, pageSize = 50 }) => {
+const callShopeeReturnsList = async ({ companyId, store, days = SHOPEE_RETURN_FIRST_SYNC_DAYS, startDate, endDate, pageSize = 50 }) => {
     const shopId = clean(store.store_shop_id || store.external_store_id);
     if (!shopId) {
         return { rows: [], skipped: true, reason: 'Shopee store shopId missing' };
@@ -1300,12 +1362,16 @@ const callShopeeReturnsList = async ({ companyId, store, pageSize = 50 }) => {
 
     const storeState = await getShopeeStoreSyncState(companyId, store.id);
     const previousLastPage = Number.parseInt(storeState?.last_synced_page || '0', 10) || 0;
+    const range = getOptionDateRange({ days, startDate, endDate }, days || SHOPEE_RETURN_FIRST_SYNC_DAYS);
     const url = `${JAVA_API_BASE_URL}${SHOPEE_RETURN_LIST_PATH}`;
-    const fetchPage = async (pageNo, purpose = 'sync') => {
+    const windows = splitUnixDateRange(range, SHOPEE_RETURN_SYNC_WINDOW_DAYS);
+    const fetchPage = async (pageNo, window, purpose = 'sync') => {
         const params = {
             shopId,
             pageNo,
             pageSize,
+            createTimeFrom: window.start,
+            createTimeTo: window.end,
         };
 
         let response;
@@ -1325,6 +1391,8 @@ const callShopeeReturnsList = async ({ companyId, store, pageSize = 50 }) => {
                     shopId,
                     pageNo,
                     pageSize,
+                    createTimeFrom: window.start,
+                    createTimeTo: window.end,
                 },
                 storeId: store.id,
                 storeName: getStoreDisplayName(store),
@@ -1343,100 +1411,19 @@ const callShopeeReturnsList = async ({ companyId, store, pageSize = 50 }) => {
         return { pageNo, rows: extracted.rows, more: extracted.more };
     };
 
-    const findLastPage = async () => {
-        const firstPage = await fetchPage(1, 'find-last');
-        if (!firstPage.rows.length) return { lastPage: 0, pages: new Map([[1, firstPage]]) };
-        const pages = new Map([[1, firstPage]]);
-        if (!firstPage.more) return { lastPage: 1, pages };
-
-        let low = 1;
-        let high = 2;
-        while (high <= SHOPEE_RETURN_SYNC_MAX_PAGES) {
-            const page = await fetchPage(high, 'find-last');
-            pages.set(high, page);
-            if (!page.rows.length || !page.more) break;
-            low = high;
-            high *= 2;
-        }
-
-        if (high > SHOPEE_RETURN_SYNC_MAX_PAGES) high = SHOPEE_RETURN_SYNC_MAX_PAGES;
-        const highPage = pages.get(high) || await fetchPage(high, 'find-last');
-        pages.set(high, highPage);
-        if (highPage.rows.length && !highPage.more) {
-            return { lastPage: high, pages };
-        }
-
-        let lastGoodPage = highPage.rows.length ? high : low;
-        let left = low + 1;
-        let right = high - 1;
-
-        while (left <= right) {
-            const mid = Math.floor((left + right) / 2);
-            const page = pages.get(mid) || await fetchPage(mid, 'find-last');
-            pages.set(mid, page);
-            if (page.rows.length) {
-                lastGoodPage = mid;
-                if (!page.more) {
-                    return { lastPage: mid, pages };
-                }
-                left = mid + 1;
-            } else {
-                right = mid - 1;
-            }
-        }
-
-        return { lastPage: lastGoodPage, pages };
-    };
-
     const rows = [];
-    let firstRequestedPage;
-    let lastFetchedPage;
+    const firstRequestedPage = 1;
+    let lastFetchedPage = 0;
     let more = false;
 
-    if (previousLastPage <= 0) {
-        const { lastPage, pages } = await findLastPage();
-        if (lastPage <= 0) {
-            await setShopeeStoreSyncState(companyId, store.id, {
-                lastSyncedPage: 0,
-                previousLastPage,
-                firstRequestedPage: 1,
-                fetchedRows: 0,
-                more: false,
-                mode: 'first-sync-latest-window',
-            });
-            return {
-                rows: [],
-                skipped: false,
-                firstRequestedPage: 1,
-                lastSyncedPage: 0,
-                previousLastPage,
-            };
-        }
-
-        firstRequestedPage = lastPage;
-        lastFetchedPage = lastPage;
-        for (let pageNo = lastPage; pageNo >= 1; pageNo -= 1) {
-            const page = pages.get(pageNo) || await fetchPage(pageNo, 'first-sync-backward');
-            pages.set(pageNo, page);
-            const recentRows = page.rows.filter((row) => isShopeeReturnWithinDays(row, SHOPEE_RETURN_FIRST_SYNC_DAYS));
-            rows.push(...recentRows);
-            lastFetchedPage = Math.max(lastFetchedPage, pageNo);
-
-            const pageHasRows = page.rows.length > 0;
-            const pageHasRecentRows = recentRows.length > 0;
-            if (!pageHasRows || !pageHasRecentRows) break;
-        }
-        more = false;
-    } else {
-        firstRequestedPage = Math.max(1, previousLastPage - SHOPEE_RETURN_SYNC_OVERLAP_PAGES);
+    for (let windowIndex = 0; windowIndex < windows.length; windowIndex += 1) {
+        const window = windows[windowIndex];
         let pageNo = firstRequestedPage;
-        lastFetchedPage = firstRequestedPage - 1;
-
         do {
-            const page = await fetchPage(pageNo, 'incremental-forward');
-            rows.push(...page.rows.filter((row) => isShopeeReturnWithinDays(row, SHOPEE_RETURN_FIRST_SYNC_DAYS)));
-            lastFetchedPage = pageNo;
-            more = page.more && page.rows.length > 0;
+            const page = await fetchPage(pageNo, window, `date-range-window-${windowIndex + 1}`);
+            rows.push(...page.rows);
+            lastFetchedPage = Math.max(lastFetchedPage, pageNo);
+            more = page.more === true && page.rows.length > 0;
             pageNo += 1;
         } while (more && pageNo <= SHOPEE_RETURN_SYNC_MAX_PAGES);
     }
@@ -1447,7 +1434,7 @@ const callShopeeReturnsList = async ({ companyId, store, pageSize = 50 }) => {
         firstRequestedPage,
         fetchedRows: rows.length,
         more,
-        mode: previousLastPage <= 0 ? 'first-sync-latest-window' : 'incremental-forward',
+        mode: 'date-range-windowed',
     });
 
     return {
@@ -1456,6 +1443,7 @@ const callShopeeReturnsList = async ({ companyId, store, pageSize = 50 }) => {
         firstRequestedPage,
         lastSyncedPage: lastFetchedPage,
         previousLastPage,
+        range,
     };
 };
 
@@ -1499,6 +1487,11 @@ const hasDueReturnSyncStore = async (user, { platform, ...options } = {}) => {
     const companyId = getUserCompanyId(user);
     const stores = await getSyncStores(user, { ...options, platform });
     for (const store of stores) {
+        try {
+            await assertStoreSubscriptionActive(store, 'return order sync');
+        } catch {
+            continue;
+        }
         const state = platform === 'shopee'
             ? await getShopeeStoreSyncState(companyId, store.id)
             : await getTikTokStoreSyncState(companyId, store.id);
@@ -1524,6 +1517,16 @@ const syncTikTokReturnOrders = async (user, options = {}) => {
     };
 
     for (const store of stores) {
+        try {
+            await assertStoreSubscriptionActive(store, 'return order sync');
+        } catch (err) {
+            summary.skippedStores.push({
+                storeId: store.id,
+                storeName: getStoreDisplayName(store),
+                reason: err.message,
+            });
+            continue;
+        }
         const storeState = await getTikTokStoreSyncState(companyId, store.id);
         if (options.dueOnly && !isReturnStoreSyncDue(storeState)) {
             summary.skippedStores.push({
@@ -1648,6 +1651,16 @@ const syncShopeeReturnOrders = async (user, options = {}) => {
     };
 
     for (const store of stores) {
+        try {
+            await assertStoreSubscriptionActive(store, 'return order sync');
+        } catch (err) {
+            summary.skippedStores.push({
+                storeId: store.id,
+                storeName: getStoreDisplayName(store),
+                reason: err.message,
+            });
+            continue;
+        }
         if (options.dueOnly && !(await shouldStartDueShopeeStoreSync(companyId, store.id))) {
             summary.skippedStores.push({
                 storeId: store.id,
@@ -1656,11 +1669,21 @@ const syncShopeeReturnOrders = async (user, options = {}) => {
             });
             continue;
         }
+        const storeState = await getShopeeStoreSyncState(companyId, store.id);
+        const firstSync = !storeState?.last_sync_at;
+        const syncDays = Number(options.days) > 0
+            ? Number(options.days)
+            : firstSync
+                ? SHOPEE_RETURN_FIRST_SYNC_DAYS
+                : SHOPEE_RETURN_RECENT_SYNC_DAYS;
         let search;
         try {
             search = await callShopeeReturnsList({
                 companyId,
                 store,
+                days: syncDays,
+                startDate: options.startDate,
+                endDate: options.endDate,
                 pageSize: options.pageSize || 50,
             });
         } catch (err) {
@@ -1805,6 +1828,9 @@ const startShopeeReturnSyncJob = async (user, options = {}) => {
         storeId: options.storeId,
         storeIds: Array.isArray(options.storeIds) ? options.storeIds : undefined,
         pageSize: options.pageSize,
+        days: options.days,
+        startDate: options.startDate,
+        endDate: options.endDate,
         dueOnly: options.dueOnly === true,
     };
 
@@ -1997,18 +2023,17 @@ const buildListWhere = async (user, filters = {}) => {
     const companyId = getUserCompanyId(user);
     const where = { company_id: companyId, deleted_at: null };
     if (filters.platform && filters.platform !== 'all') where.platform = filters.platform;
+    const usableStoreIds = await getUsableReturnOrderStoreIds(user, filters);
+    appendAndCondition(where, { platform_store_id: { [Op.in]: usableStoreIds.length ? usableStoreIds : [-1] } });
     if (filters.status && filters.status !== 'all') where.erp_return_status = normalizeNullableStatus(filters.status);
     const dateCondition = getListDateCondition(filters);
     if (dateCondition) {
-        where[Op.and] = [
-            ...(where[Op.and] || []),
-            {
-                [Op.or]: [
-                    { platform_created_at: dateCondition },
-                    { platform_created_at: null, created_at: dateCondition },
-                ],
-            },
-        ];
+        appendAndCondition(where, {
+            [Op.or]: [
+                { platform_created_at: dateCondition },
+                { platform_created_at: null, created_at: dateCondition },
+            ],
+        });
     }
     if (filters.warehouseId && filters.warehouseId !== 'all') {
         await assertWarehousePermission(user, filters.warehouseId);
@@ -2033,10 +2058,7 @@ const buildListWhere = async (user, filters = {}) => {
 
     const searchCondition = await buildSearchCondition(companyId, filters);
     if (searchCondition) {
-        where[Op.and] = [
-            ...(where[Op.and] || []),
-            searchCondition,
-        ];
+        appendAndCondition(where, searchCondition);
     }
 
     return where;
@@ -2046,7 +2068,7 @@ const getReturnInclude = () => {
     const { ReturnOrderLine, Warehouse, PlatformStore, MerchantSku } = require('../../models');
     return [
         { model: Warehouse, as: 'warehouse', attributes: ['id', 'name', 'code'], required: false },
-        { model: PlatformStore, as: 'platformStore', attributes: ['id', 'platform', 'store_name', 'external_store_id', 'store_shop_id', 'region'], required: false },
+        { model: PlatformStore, as: 'platformStore', attributes: ['id', 'company_id', 'platform', 'store_name', 'external_store_id', 'store_shop_id', 'store_open_id', 'store_cipher', 'region'], required: false },
         {
             model: ReturnOrderLine,
             as: 'lines',
@@ -2222,6 +2244,7 @@ const getManualReturnStore = async (user, { platform, platformStoreId }) => {
         err.statusCode = 404;
         throw err;
     }
+    await assertStoreSubscriptionActive(store, 'return order operations');
     return store;
 };
 
@@ -2420,68 +2443,193 @@ const createManualReturnOrder = async (user, data) => {
         throw err;
     }
     const skuMap = new Map(skus.map((sku) => [Number(sku.id), sku]));
+    const baseReturnId = clean(data.returnId || data.platformReturnId || data.platform_return_id)
+        || `manual-${platform}-${store.id}-${orderNumber}-${Date.now()}`;
+    let platformReturnId = baseReturnId;
+    const allowAutoReturnIdRetry = isAutoManualReturnId(platformReturnId);
+    let existingManualReturn = null;
 
-    const created = await sequelize.transaction(async (transaction) => {
-        const order = await ReturnOrder.create({
-            company_id: companyId,
-            platform,
-            platform_store_id: store.id,
-            platform_order_id: clean(data.platformOrderId || data.platform_order_id) || orderNumber,
-            platform_return_id: clean(data.returnId || data.platformReturnId || data.platform_return_id) || `manual-${platform}-${store.id}-${orderNumber}-${Date.now()}`,
-            order_number: orderNumber,
-            platform_created_at: toDateFromPlatformTime(data.platformCreatedAt || data.platform_created_at) || new Date(),
-            platform_updated_at: toDateFromPlatformTime(data.platformUpdatedAt || data.platform_updated_at) || new Date(),
-            buyer_username: clean(data.buyerUsername || data.buyer_username) || null,
-            buyer_email: clean(data.buyerEmail || data.buyer_email) || null,
-            warehouse_package_no: clean(data.warehousePackageNo || data.warehouse_package_no) || orderNumber,
-            warehouse_id: warehouseId,
-            store_name: getStoreDisplayName(store),
-            erp_return_status: 'need_to_check',
-            platform_status_label: 'Need To Check',
-            return_reason: clean(data.returnReason || data.return_reason) || null,
-            return_reason_text: clean(data.returnReasonText || data.return_reason_text) || null,
-            local_return_type: normalizeReturnType(data.returnType || data.localReturnType || 'by_logistic'),
-            return_tracking_number: clean(data.trackingNumber || data.returnTrackingNo || data.return_tracking_number) || null,
-            local_return_tracking_number: clean(data.localReturnTrackingNo || data.local_return_tracking_number) || null,
-            logistic_name: clean(data.logisticName || data.logistic_name) || null,
-            refund_currency: clean(data.refundCurrency || data.refund_currency) || null,
-            refund_total: data.refundTotal !== undefined && data.refundTotal !== '' ? Number(data.refundTotal) || null : null,
-            remark: clean(data.remark || data.notes) || null,
-            is_manual: true,
-            created_by: user.userId,
-            raw_json: {
-                ...(typeof data.raw === 'object' && data.raw ? data.raw : {}),
-                orderNumber,
-                warehousePackageNo: clean(data.warehousePackageNo || data.warehouse_package_no),
-                platform,
-                platformStoreId: store.id,
-                createdFrom: 'erp_manual_return',
-            },
-        }, { transaction });
-
-        await ReturnOrderLine.bulkCreate(lines.map((line) => {
-            const skuId = Number(line.merchantSkuId || line.merchant_sku_id);
-            const sku = skuMap.get(skuId);
-            return {
+    for (let retry = 0; retry < 10; retry++) {
+        existingManualReturn = await ReturnOrder.findOne({
+            where: {
                 company_id: companyId,
-                return_order_id: order.id,
-                merchant_sku_id: skuId,
-                return_line_item_id: clean(line.returnLineItemId || line.return_line_item_id) || `manual-${skuId}`,
-                platform_sku_id: clean(line.platformModelId || line.platformSkuId || line.platform_sku_id) || null,
-                order_line_item_id: clean(line.platformItemId || line.orderLineItemId || line.order_line_item_id) || null,
-                seller_sku: clean(line.sku || line.skuName || sku?.sku_name) || null,
-                sku_name: clean(line.sku || line.skuName || sku?.sku_name) || null,
-                product_name: clean(line.productName || line.name || sku?.sku_title || sku?.sku_name) || 'Return product',
-                product_image_url: clean(line.image || line.imageUrl || sku?.image_url) || null,
-                quantity: toPositiveInt(line.quantity || line.qty, 'quantity'),
-                raw_json: line,
-            };
-        }), { transaction });
+                platform,
+                platform_return_id: platformReturnId,
+            },
+            paranoid: false,
+        });
 
-        return order;
-    });
+        if (!existingManualReturn) {
+            break;
+        }
+
+        if (existingManualReturn.deleted_at && existingManualReturn.is_manual && !existingManualReturn.is_resaleable_inbounded) {
+            await sequelize.transaction(async (transaction) => {
+                await ReturnOrderLine.destroy({
+                    where: { return_order_id: existingManualReturn.id },
+                    transaction,
+                });
+                await existingManualReturn.destroy({ force: true, transaction });
+            });
+            existingManualReturn = null;
+            break;
+        }
+
+        if (!allowAutoReturnIdRetry) {
+            break;
+        }
+
+        platformReturnId = `${baseReturnId}-${Date.now()}-${retry + 1}`;
+    }
+
+    if (existingManualReturn) {
+        const err = new Error('Manual return order already exists for this platform store');
+        err.statusCode = 409;
+        throw err;
+    }
+
+    let created;
+    try {
+        created = await sequelize.transaction(async (transaction) => {
+            const order = await ReturnOrder.create({
+                company_id: companyId,
+                platform,
+                platform_store_id: store.id,
+                platform_order_id: clean(data.platformOrderId || data.platform_order_id) || orderNumber,
+                platform_return_id: platformReturnId,
+                order_number: orderNumber,
+                platform_created_at: toDateFromPlatformTime(data.platformCreatedAt || data.platform_created_at) || new Date(),
+                platform_updated_at: toDateFromPlatformTime(data.platformUpdatedAt || data.platform_updated_at) || new Date(),
+                buyer_username: clean(data.buyerUsername || data.buyer_username) || null,
+                buyer_email: clean(data.buyerEmail || data.buyer_email) || null,
+                warehouse_package_no: clean(data.warehousePackageNo || data.warehouse_package_no) || orderNumber,
+                warehouse_id: warehouseId,
+                store_name: getStoreDisplayName(store),
+                erp_return_status: 'need_to_check',
+                platform_status_label: 'Need To Check',
+                return_reason: clean(data.returnReason || data.return_reason) || null,
+                return_reason_text: clean(data.returnReasonText || data.return_reason_text) || null,
+                local_return_type: normalizeReturnType(data.returnType || data.localReturnType || 'by_logistic'),
+                return_tracking_number: clean(data.trackingNumber || data.returnTrackingNo || data.return_tracking_number) || null,
+                local_return_tracking_number: clean(data.localReturnTrackingNo || data.local_return_tracking_number) || null,
+                logistic_name: clean(data.logisticName || data.logistic_name) || null,
+                refund_currency: clean(data.refundCurrency || data.refund_currency) || null,
+                refund_total: data.refundTotal !== undefined && data.refundTotal !== '' ? Number(data.refundTotal) || null : null,
+                remark: clean(data.remark || data.notes) || null,
+                is_manual: true,
+                created_by: user.userId,
+                raw_json: {
+                    ...(typeof data.raw === 'object' && data.raw ? data.raw : {}),
+                    orderNumber,
+                    warehousePackageNo: clean(data.warehousePackageNo || data.warehouse_package_no),
+                    platform,
+                    platformStoreId: store.id,
+                    createdFrom: 'erp_manual_return',
+                },
+            }, { transaction });
+
+            await ReturnOrderLine.bulkCreate(lines.map((line) => {
+                const skuId = Number(line.merchantSkuId || line.merchant_sku_id);
+                const sku = skuMap.get(skuId);
+                return {
+                    company_id: companyId,
+                    return_order_id: order.id,
+                    merchant_sku_id: skuId,
+                    return_line_item_id: clean(line.returnLineItemId || line.return_line_item_id) || `manual-${skuId}`,
+                    platform_sku_id: clean(line.platformModelId || line.platformSkuId || line.platform_sku_id) || null,
+                    order_line_item_id: clean(line.platformItemId || line.orderLineItemId || line.order_line_item_id) || null,
+                    seller_sku: clean(line.sku || line.skuName || sku?.sku_name) || null,
+                    sku_name: clean(line.sku || line.skuName || sku?.sku_name) || null,
+                    product_name: clean(line.productName || line.name || sku?.sku_title || sku?.sku_name) || 'Return product',
+                    product_image_url: clean(line.image || line.imageUrl || sku?.image_url) || null,
+                    quantity: toPositiveInt(line.quantity || line.qty, 'quantity'),
+                    raw_json: line,
+                };
+            }), { transaction });
+
+            return order;
+        });
+    } catch (err) {
+        if (err.name === 'SequelizeUniqueConstraintError') {
+            const duplicateError = new Error('Manual return order already exists for this platform store');
+            duplicateError.statusCode = 409;
+            throw duplicateError;
+        }
+        throw err;
+    }
 
     return getReturnOrderById(user, created.id);
+};
+
+const updateManualReturnOrder = async (user, id, data = {}) => {
+    const { ReturnOrder, Warehouse } = require('../../models');
+    const companyId = getUserCompanyId(user);
+    const warehouseId = Number(data.warehouseId || data.warehouse_id);
+    const platform = clean(data.platform).toLowerCase();
+    const orderNumber = clean(data.orderNumber || data.order_number);
+    const store = await getManualReturnStore(user, { platform, platformStoreId: data.platformStoreId || data.storeId });
+
+    if (!warehouseId) {
+        const err = new Error('warehouseId is required');
+        err.statusCode = 400;
+        throw err;
+    }
+    if (!orderNumber) {
+        const err = new Error('orderNumber is required');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    await assertWarehousePermission(user, warehouseId, { canEdit: true });
+    const warehouse = await Warehouse.findOne({ where: { id: warehouseId, company_id: companyId, status: 'active' } });
+    if (!warehouse) {
+        const err = new Error('Warehouse not found');
+        err.statusCode = 404;
+        throw err;
+    }
+
+    const order = await ReturnOrder.findOne({
+        where: { id, company_id: companyId, deleted_at: null },
+    });
+    await assertReturnOrderAccess(user, order);
+    if (!order?.is_manual) {
+        const err = new Error('Only manual return orders can be edited here');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const rawJson = parseJsonValue(order.raw_json, {});
+    await order.update({
+        platform,
+        platform_store_id: store.id,
+        platform_order_id: clean(data.platformOrderId || data.platform_order_id) || orderNumber,
+        platform_return_id: clean(data.returnId || data.platformReturnId || data.platform_return_id) || order.platform_return_id,
+        order_number: orderNumber,
+        buyer_username: clean(data.buyerUsername || data.buyer_username) || null,
+        buyer_email: clean(data.buyerEmail || data.buyer_email) || null,
+        warehouse_package_no: clean(data.warehousePackageNo || data.warehouse_package_no) || orderNumber,
+        warehouse_id: warehouseId,
+        store_name: getStoreDisplayName(store),
+        return_reason: clean(data.returnReason || data.return_reason) || null,
+        return_reason_text: clean(data.returnReasonText || data.return_reason_text) || null,
+        local_return_type: normalizeReturnType(data.returnType || data.localReturnType || order.local_return_type || 'by_logistic'),
+        return_tracking_number: clean(data.trackingNumber || data.returnTrackingNo || data.return_tracking_number) || null,
+        local_return_tracking_number: clean(data.localReturnTrackingNo || data.local_return_tracking_number) || null,
+        logistic_name: clean(data.logisticName || data.logistic_name) || null,
+        refund_currency: clean(data.refundCurrency || data.refund_currency) || null,
+        refund_total: data.refundTotal !== undefined && data.refundTotal !== '' ? Number(data.refundTotal) || null : null,
+        remark: clean(data.remark || data.notes) || null,
+        raw_json: {
+            ...(typeof rawJson === 'object' && rawJson ? rawJson : {}),
+            orderNumber,
+            warehousePackageNo: clean(data.warehousePackageNo || data.warehouse_package_no),
+            platform,
+            platformStoreId: store.id,
+            updatedFrom: 'erp_manual_return_edit',
+        },
+    });
+
+    return getReturnOrderById(user, order.id);
 };
 
 const createReturnInbound = async ({ user, order, warehouseId, transaction }) => {
@@ -2662,6 +2810,11 @@ const updateReturnStatus = async (user, id, data = {}) => {
             transaction,
         });
         await assertReturnOrderAccess(user, order, { canEdit: true });
+        if (!order?.is_manual) {
+            await assertStoreSubscriptionActive(order.platformStore, 'return status updates', transaction);
+        } else if (order?.platformStore) {
+            await assertStoreSubscriptionActive(order.platformStore, 'return status updates', transaction);
+        }
 
         const updateData = {
             warehouse_id: warehouseId,
@@ -2738,7 +2891,7 @@ const updateReturnStatus = async (user, id, data = {}) => {
 };
 
 const deleteReturnOrder = async (user, id, data = {}) => {
-    const { ReturnOrder } = require('../../models');
+    const { ReturnOrder, ReturnOrderLine } = require('../../models');
     const order = await ReturnOrder.findOne({
         where: { id, company_id: getUserCompanyId(user), deleted_at: null },
         include: getReturnInclude(),
@@ -2759,8 +2912,19 @@ const deleteReturnOrder = async (user, id, data = {}) => {
         throw err;
     }
 
+    if (order.is_manual) {
+        await sequelize.transaction(async (transaction) => {
+            await ReturnOrderLine.destroy({
+                where: { return_order_id: order.id },
+                transaction,
+            });
+            await order.destroy({ force: true, transaction });
+        });
+        return { id: Number(id), deleted: true, permanent: true };
+    }
+
     await order.destroy();
-    return { id: Number(id), deleted: true };
+    return { id: Number(id), deleted: true, permanent: false };
 };
 
 module.exports = {
@@ -2776,6 +2940,7 @@ module.exports = {
     getReturnOrderById,
     lookupManualReturnOrder,
     createManualReturnOrder,
+    updateManualReturnOrder,
     updateReturnStatus,
     deleteReturnOrder,
 };

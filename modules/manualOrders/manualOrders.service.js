@@ -7,10 +7,14 @@ const { Op } = require("sequelize");
 const { sequelize } = require("../../config/database");
 const platformOrderDeductionsService = require("../platformOrderDeductions/platformOrderDeductions.service");
 const sellableSkuStock = require("../shared/sellableSkuStock");
+const { assertStoreSubscriptionActive } = require("../subscription/subscription.service");
+const shippingWalletService = require('./manualOrderShippingWallet.service');
 const { applyWarehouseScope, assertWarehousePermission } = require("../../utils/permissions");
 
 const DEFAULT_IMAGE = "https://placehold.co/36x36/E6ECF0/004368?text=?";
 const EASY_PARCEL_TIMEOUT_MS = Number(process.env.EASYPARCEL_TIMEOUT_MS || 20000);
+const EASY_PARCEL_BOOKING_MARGIN_MYR = Number(process.env.MANUAL_ORDER_SHIPPING_BOOKING_MARGIN_MYR || 1);
+const EASY_PARCEL_BOOKING_MARGIN_RATE = Number(process.env.MANUAL_ORDER_SHIPPING_BOOKING_MARGIN_RATE || 0.05);
 
 const normalizeString = (value) => {
     if (value === undefined || value === null) return "";
@@ -927,6 +931,7 @@ const normalizeEasyParcelRate = (rate, index, config) => {
     const pricing = rate?.pricing || rate?.price || {};
     const cod = readFeatureValue(rate?.features || courier?.features, "cod") || {};
     const totalAmount = moneyNumber(pricing.total_amount || pricing.totalAmount || pricing.shipment_price || pricing.shipmentPrice || rate.total_amount || rate.price || rate.rate || rate.shipping_fee);
+    const sellerPayableAmount = moneyNumber(pricing.seller_payable_amount || pricing.sellerPayableAmount || rate.seller_payable_amount || rate.sellerPayableAmount || rate.seller_payable);
     const shipmentPrice = moneyNumber(pricing.shipment_price || pricing.shipmentPrice || totalAmount);
     const codAvailable = cod.available === true || normalizeString(cod.available).toLowerCase() === "true" || rate.cod_service_available === true;
     const serviceId = normalizeString(courier.service_id || courier.serviceId || rate.service_id || rate.serviceId || rate.courier_id || rate.id || index);
@@ -940,7 +945,9 @@ const normalizeEasyParcelRate = (rate, index, config) => {
         company: normalizeString(courier.courier_name || courier.courierName || rate.courier_name || rate.company || rate.courier) || "EasyParcel Courier",
         serviceName: normalizeString(courier.service_name || courier.serviceName || rate.service_name || rate.service || rate.name) || normalizeString(courier.courier_name),
         serviceType: normalizeString(courier.service_tag || rate.service_type || rate.serviceType || "parcel"),
-        price: totalAmount,
+        price: sellerPayableAmount || totalAmount,
+        displayPrice: totalAmount,
+        sellerPayableAmount,
         shipmentPrice,
         addonPrice: moneyNumber(pricing.addon_price || pricing.addonPrice || rate.addon_price),
         currency: normalizeString(pricing.currency || rate.currency || config.currency),
@@ -952,6 +959,96 @@ const normalizeEasyParcelRate = (rate, index, config) => {
         codMinAmount: moneyNumber(cod.min_cod_amount || cod.minCodAmount || rate.cod_service_min_cod_amount),
         codMaxAmount: moneyNumber(cod.max_cod_amount || cod.maxCodAmount || rate.cod_service_max_cod_amount),
         raw: rate,
+    };
+};
+
+const getEasyParcelPayableAmount = (rate = {}) => {
+    const raw = rate.raw || {};
+    const pricing = raw.pricing || raw.price || {};
+    return moneyNumber(
+        rate.sellerPayableAmount ||
+        rate.seller_payable_amount ||
+        pricing.seller_payable_amount ||
+        pricing.sellerPayableAmount ||
+        raw.seller_payable_amount ||
+        raw.sellerPayableAmount ||
+        rate.price ||
+        rate.shipmentPrice ||
+        pricing.total_amount ||
+        pricing.totalAmount ||
+        raw.total_amount ||
+        raw.price ||
+        raw.rate ||
+        raw.shipping_fee
+    );
+};
+
+const calculateEasyParcelBookingReserve = (amount, currency) => {
+    const trustedAmount = moneyNumber(amount);
+    const normalizedCurrency = normalizeString(currency || "MYR").toUpperCase();
+    const fxRate = shippingWalletService.getFxRateToMyr(normalizedCurrency);
+    const fixedMarginOriginal = fxRate > 0 ? EASY_PARCEL_BOOKING_MARGIN_MYR / fxRate : 0;
+    const percentMarginOriginal = trustedAmount * Math.max(0, EASY_PARCEL_BOOKING_MARGIN_RATE);
+    return Number((trustedAmount + Math.max(fixedMarginOriginal, percentMarginOriginal, 0)).toFixed(2));
+};
+
+const findMatchingEasyParcelRate = (rates = [], serviceId, selectedRate = {}) => {
+    const selectedServiceId = normalizeString(serviceId || selectedRate.serviceId || selectedRate.service_id);
+    const selectedRateId = normalizeString(selectedRate.rateId || selectedRate.rate_id);
+    const selectedCourierId = normalizeString(selectedRate.courierId || selectedRate.courier_id);
+    return rates.find((rate) => {
+        return normalizeString(rate.serviceId) === selectedServiceId ||
+            (selectedRateId && normalizeString(rate.rateId) === selectedRateId) ||
+            (selectedCourierId && normalizeString(rate.courierId) === selectedCourierId);
+    }) || null;
+};
+
+const getTrustedEasyParcelRateForBooking = async ({ config, warehouse, body, selectedRate, serviceId }) => {
+    const easyParcel = body.easyParcel || {};
+    const sender = getWarehouseSender(warehouse, easyParcel.sender || body.sender || {});
+    const receiver = getBuyerReceiver({ ...(body.buyer || {}), email: easyParcel.receiverEmail || body?.buyer?.email }, sender.country);
+    const validationMessage = validateRateAddress({ config, sender, receiver });
+    if (validationMessage) {
+        const err = new Error(validationMessage);
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const dimensions = resolvePackageDimensions(body);
+    const payment = body.payment || {};
+    const query = {
+        ...dimensions,
+        parcelValue: Math.max(1, moneyNumber(easyParcel.parcelValue || payment.orderValue || payment.subtotal || body.orderValue || 1)),
+    };
+    const response = await callEasyParcelOpenApi(config, {
+        method: "POST",
+        path: `/open_api/${config.openApiVersion}/shipment/quotations`,
+        data: { shipment: [buildQuotationShipment({ config, sender, receiver, query })] },
+    });
+    const first = Array.isArray(response?.data) ? response.data[0] || {} : response?.data || response || {};
+    const quotations = Array.isArray(first.quotations) ? first.quotations : Array.isArray(response?.quotations) ? response.quotations : [];
+    const rates = quotations.map((rate, index) => normalizeEasyParcelRate(rate, index, config)).filter((rate) => rate.serviceId);
+    const trustedRate = findMatchingEasyParcelRate(rates, serviceId, selectedRate);
+    if (!trustedRate) {
+        const err = new Error("Selected EasyParcel courier service is no longer available. Please refresh courier rates and select again.");
+        err.statusCode = 400;
+        err.easyParcelResponse = response;
+        throw err;
+    }
+
+    const payableAmount = getEasyParcelPayableAmount(trustedRate);
+    if (payableAmount <= 0) {
+        const err = new Error("EasyParcel trusted payable amount is missing. Please refresh courier rates and select again.");
+        err.statusCode = 400;
+        err.easyParcelResponse = response;
+        throw err;
+    }
+
+    return {
+        rate: trustedRate,
+        payableAmount,
+        currency: trustedRate.currency || config.currency,
+        response,
     };
 };
 
@@ -1260,7 +1357,7 @@ const buildSubmitOrderPayload = ({ config, warehouse = {}, body = {}, orderNumbe
     const easyParcel = body.easyParcel || {};
     const sender = getWarehouseSender(warehouse, easyParcel.sender || body.sender || {});
     const receiver = getBuyerReceiver({ ...(body.buyer || {}), email: easyParcel.receiverEmail || body?.buyer?.email }, sender.country);
-    const selectedRate = easyParcel.selectedRate || body.logisticRaw || body.logistic_raw || {};
+    let selectedRate = easyParcel.selectedRate || body.logisticRaw || body.logistic_raw || {};
     const serviceId = normalizeString(body.logisticServiceId || body.logistic_service_id || selectedRate.serviceId || selectedRate.service_id);
     const payment = body.payment || {};
     const paymentType = normalizeManualOrderPaymentType(payment);
@@ -1420,6 +1517,86 @@ const parseSubmitResult = (response) => {
         courier: normalizeString(shipment.courier?.courier_name || shipment.courier_name || shipment.courier || shipment.service_name),
         raw: first,
     };
+};
+
+const easyParcelResponseHasPaidShipment = (response) => {
+    const parsed = parseSubmitResult(response);
+    return Boolean(parsed.awb || parsed.awbLink || parsed.shipmentNumber || parsed.parcelNumber);
+};
+
+const shouldRefundWalletAfterEasyParcelFailure = (err) => {
+    if (!err?.easyParcelResponse) return false;
+    if (easyParcelResponseHasPaidShipment(err.easyParcelResponse)) return false;
+    const message = normalizeString(err.message || err.easyParcelResponse?.message || err.easyParcelResponse?.error_remark).toLowerCase();
+    if (/insufficient credit|required|invalid|missing|not available|no courier|not found|validation|failed/.test(message)) return true;
+    return err.statusCode >= 400 && err.statusCode < 500;
+};
+
+const reconcileEasyParcelWalletDebit = async ({ user, manualOrderId, walletDebit, actualAmount, actualCurrency, referenceBase, metadata = {} }) => {
+    if (!walletDebit?.ledger?.id) return { status: 'not_debited', totalChargeMyr: 0 };
+    const reserveMyr = moneyNumber(walletDebit.charge?.amountMyr);
+    const payableAmount = moneyNumber(actualAmount);
+    const currency = normalizeString(actualCurrency || walletDebit.charge?.originalCurrency || 'MYR');
+    if (payableAmount <= 0) {
+        return {
+            status: 'debited',
+            totalChargeMyr: reserveMyr,
+            actualCharge: null,
+            reserveMyr,
+            note: 'EasyParcel final payable amount was not returned; kept reserved debit.',
+        };
+    }
+
+    const actualCharge = shippingWalletService.convertToMyr(payableAmount, currency);
+    const differenceMyr = Number((reserveMyr - actualCharge.amountMyr).toFixed(2));
+    const result = {
+        status: 'debited',
+        totalChargeMyr: actualCharge.amountMyr,
+        actualCharge,
+        reserveMyr,
+        differenceMyr,
+    };
+
+    if (differenceMyr > 0.01) {
+        const refund = await shippingWalletService.refundManualOrderAmount({
+            user,
+            debitLedgerId: walletDebit.ledger.id,
+            manualOrderId,
+            amountMyr: differenceMyr,
+            reference: `${referenceBase}:reserve-refund`,
+            reason: 'EasyParcel final payable amount was lower than reserved wallet debit',
+        });
+        result.refundLedger = refund?.ledger || null;
+        return result;
+    }
+
+    if (differenceMyr < -0.01) {
+        try {
+            const additionalDebit = await shippingWalletService.debitForManualOrderBooking({
+                user,
+                manualOrderId,
+                amount: Math.abs(differenceMyr),
+                currency: 'MYR',
+                provider: 'easyparcel',
+                reference: `${referenceBase}:final-difference`,
+                metadata: {
+                    ...metadata,
+                    reason: 'EasyParcel final payable amount exceeded reserved wallet debit',
+                    reserveLedgerId: walletDebit.ledger.id,
+                    actualCharge,
+                },
+            });
+            result.additionalDebitLedger = additionalDebit.ledger;
+            return result;
+        } catch (error) {
+            result.status = 'payment_review_required';
+            result.totalChargeMyr = reserveMyr;
+            result.error = error.message || 'Unable to debit EasyParcel final payable difference.';
+            return result;
+        }
+    }
+
+    return result;
 };
 
 
@@ -2134,7 +2311,7 @@ const prepareEasyParcelBooking = async ({ warehouse, body, orderNumber, type, ex
     const sender = getWarehouseSender(warehouse, easyParcel.sender || body.sender || {});
     const receiver = getBuyerReceiver({ ...(body.buyer || {}), email: easyParcel.receiverEmail || body?.buyer?.email }, sender.country);
     const config = getEasyParcelConfig(sender.country);
-    const selectedRate = easyParcel.selectedRate || body.logisticRaw || body.logistic_raw || {};
+    let selectedRate = easyParcel.selectedRate || body.logisticRaw || body.logistic_raw || {};
     const serviceId = normalizeString(body.logisticServiceId || body.logistic_service_id || selectedRate.serviceId || selectedRate.service_id);
 
     if (!easyParcel.bookNow) return null;
@@ -2243,7 +2420,7 @@ const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, typ
     const sender = getWarehouseSender(warehouse, easyParcel.sender || body.sender || {});
     const receiver = getBuyerReceiver({ ...(body.buyer || {}), email: easyParcel.receiverEmail || body?.buyer?.email }, sender.country);
     const config = getEasyParcelConfig(sender.country);
-    const selectedRate = easyParcel.selectedRate || body.logisticRaw || body.logistic_raw || {};
+    let selectedRate = easyParcel.selectedRate || body.logisticRaw || body.logistic_raw || {};
     const serviceId = normalizeString(body.logisticServiceId || body.logistic_service_id || selectedRate.serviceId || selectedRate.service_id);
     const existingRaw = getOrderLogisticRaw(createdOrder);
     const isCancelledRebook = normalizeManualStatus(createdOrder?.status) === MANUAL_ORDER_STATUSES.CANCELLED;
@@ -2269,16 +2446,75 @@ const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, typ
         updates: { booking_status: "BOOKING_PENDING", booking_error: null },
     });
 
+    let walletDebit = null;
+    let trustedRateCheck = null;
     try {
+        trustedRateCheck = await getTrustedEasyParcelRateForBooking({ config, warehouse, body, selectedRate, serviceId });
+        selectedRate = { ...selectedRate, ...trustedRateCheck.rate };
+        const selectedCharge = calculateEasyParcelBookingReserve(trustedRateCheck.payableAmount, trustedRateCheck.currency);
+        const selectedCurrency = trustedRateCheck.currency || config.currency || 'MYR';
+        walletDebit = await shippingWalletService.debitForManualOrderBooking({
+            user,
+            manualOrderId: createdOrder.id,
+            amount: selectedCharge,
+            currency: selectedCurrency,
+            provider: 'easyparcel',
+            reference: `easyparcel:${createdOrder.id}:${Date.now()}`,
+            metadata: {
+                orderNumber: createdOrder.order_number,
+                serviceId,
+                courier: selectedRate.company || selectedRate.serviceName || 'EasyParcel',
+                selectedRate,
+                trustedPayableAmount: trustedRateCheck.payableAmount,
+                trustedPayableCurrency: trustedRateCheck.currency,
+                reservedAmount: selectedCharge,
+                bookingMarginMyr: EASY_PARCEL_BOOKING_MARGIN_MYR,
+                bookingMarginRate: EASY_PARCEL_BOOKING_MARGIN_RATE,
+            },
+        });
+
+        const bookingBody = {
+            ...body,
+            easyParcel: { ...easyParcel, selectedRate },
+            logisticRaw: selectedRate,
+            logistic_raw: selectedRate,
+        };
         const prepared = await prepareEasyParcelBooking({
             warehouse,
-            body,
+            body: bookingBody,
             orderNumber: createdOrder.order_number,
             type,
             existingOrder: createdOrder,
             existingRaw,
         });
         const { bookingResult, updatePatch, nextStatus, submit } = prepared;
+        const actualPayableAmount = submit.price > 0 ? submit.price : trustedRateCheck.payableAmount;
+        const walletReconciliation = await reconcileEasyParcelWalletDebit({
+            user,
+            manualOrderId: createdOrder.id,
+            walletDebit,
+            actualAmount: actualPayableAmount,
+            actualCurrency: trustedRateCheck.currency,
+            referenceBase: `easyparcel:${createdOrder.id}`,
+            metadata: {
+                orderNumber: createdOrder.order_number,
+                serviceId,
+                courier: selectedRate.company || selectedRate.serviceName || 'EasyParcel',
+            },
+        });
+        updatePatch.shipping_wallet_ledger_id = walletDebit.ledger.id;
+        updatePatch.shipping_wallet_status = walletReconciliation.status;
+        updatePatch.shipping_charge_myr = walletReconciliation.totalChargeMyr;
+        updatePatch.shipping_charge_original_amount = actualPayableAmount;
+        updatePatch.shipping_charge_original_currency = trustedRateCheck.currency;
+        updatePatch.shipping_fx_rate_to_myr = walletReconciliation.actualCharge?.fxRateToMyr || walletDebit.charge.fxRateToMyr;
+        if (walletReconciliation.status === 'payment_review_required') {
+            updatePatch.booking_status = 'PAYMENT_REVIEW_REQUIRED';
+            updatePatch.booking_error = walletReconciliation.error || 'EasyParcel final payable amount exceeded wallet reserve and needs admin review.';
+        }
+        bookingResult.walletDebit = walletDebit.ledger;
+        bookingResult.walletReconciliation = walletReconciliation;
+        bookingResult.chargeMyr = walletReconciliation.totalChargeMyr;
 
         await ManualOrder.update(updatePatch, { where: { id: createdOrder.id, company_id: user.companyId } });
         await createManualStatusHistory({
@@ -2292,6 +2528,17 @@ const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, typ
 
         return bookingResult;
     } catch (err) {
+        let walletRefund = null;
+        const shouldRefundWallet = shouldRefundWalletAfterEasyParcelFailure(err);
+        if (walletDebit?.ledger?.id && shouldRefundWallet) {
+            walletRefund = await shippingWalletService.refundManualOrderDebit({
+                user,
+                debitLedgerId: walletDebit.ledger.id,
+                manualOrderId: createdOrder.id,
+                reason: err.message || 'EasyParcel booking failed',
+            });
+        }
+        const pendingOwnerReview = Boolean(walletDebit?.ledger?.id && !walletRefund);
         const logisticRaw = buildManualOrderLogisticRaw({
             existing: existingRaw,
             selectedRate,
@@ -2302,16 +2549,27 @@ const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, typ
             content: easyParcel.content || createdOrder.package_content || "Product",
             easyParcel: {
                 ...bookingResult,
+                walletDebit: walletDebit?.ledger || null,
+                walletRefund: walletRefund?.ledger || null,
+                walletReviewRequired: pendingOwnerReview,
+                trustedRateCheck: trustedRateCheck ? {
+                    payableAmount: trustedRateCheck.payableAmount,
+                    currency: trustedRateCheck.currency,
+                    serviceId: trustedRateCheck.rate?.serviceId,
+                } : null,
                 error: err.message || "EasyParcel booking failed",
                 errorResponse: err.easyParcelResponse || null,
             },
         });
         await ManualOrder.update({
-            status: MANUAL_ORDER_STATUSES.BOOKING_FAILED,
-            shipment_status: MANUAL_ORDER_STATUSES.BOOKING_FAILED,
-            booking_status: "BOOKING_FAILED",
-            booking_error: err.message || "EasyParcel booking failed",
+            status: pendingOwnerReview ? MANUAL_ORDER_STATUSES.BOOKING_PENDING : MANUAL_ORDER_STATUSES.BOOKING_FAILED,
+            shipment_status: pendingOwnerReview ? MANUAL_ORDER_STATUSES.BOOKING_PENDING : MANUAL_ORDER_STATUSES.BOOKING_FAILED,
+            booking_status: pendingOwnerReview ? "BOOKING_PENDING_REVIEW" : "BOOKING_FAILED",
+            booking_error: pendingOwnerReview
+                ? `EasyParcel booking result is uncertain and wallet debit is held for admin review: ${err.message || "EasyParcel booking failed"}`
+                : err.message || "EasyParcel booking failed",
             logistic_raw: logisticRaw,
+            shipping_wallet_status: walletDebit?.ledger ? (walletRefund ? 'refunded' : 'pending_review') : 'not_debited',
             last_status_checked_at: new Date(),
             ...(isCancelledRebook ? {
                 tracking_number: null,
@@ -2328,9 +2586,11 @@ const bookEasyParcelShipment = async ({ user, warehouse, body, createdOrder, typ
             user,
             order: createdOrder,
             oldStatus: createdOrder.status,
-            newStatus: MANUAL_ORDER_STATUSES.BOOKING_FAILED,
-            rawProviderStatus: "BOOKING_FAILED",
-            note: err.message || "EasyParcel booking failed",
+            newStatus: pendingOwnerReview ? MANUAL_ORDER_STATUSES.BOOKING_PENDING : MANUAL_ORDER_STATUSES.BOOKING_FAILED,
+            rawProviderStatus: pendingOwnerReview ? "BOOKING_PENDING_REVIEW" : "BOOKING_FAILED",
+            note: pendingOwnerReview
+                ? `EasyParcel booking result uncertain; wallet debit kept for admin review. ${err.message || ""}`.trim()
+                : err.message || "EasyParcel booking failed",
         });
         const wrapped = new Error(`Manual order saved, but EasyParcel booking failed: ${err.message}`);
         wrapped.statusCode = err.statusCode || 502;
@@ -2932,6 +3192,14 @@ const toManualOrderApi = (order) => {
         codPayoutReference: plain.cod_payout_reference || "",
         codSettlementNote: plain.cod_settlement_note || "",
         platformFee: Number(plain.platform_fee || 0),
+        shippingWallet: {
+            ledgerId: plain.shipping_wallet_ledger_id || null,
+            status: plain.shipping_wallet_status || "",
+            chargeMyr: Number(plain.shipping_charge_myr || 0),
+            originalAmount: Number(plain.shipping_charge_original_amount || 0),
+            originalCurrency: plain.shipping_charge_original_currency || "",
+            fxRateToMyr: plain.shipping_fx_rate_to_myr == null ? null : Number(plain.shipping_fx_rate_to_myr),
+        },
         paymentCertificateUrl: plain.payment_certificate_url || logisticRaw.payment?.paymentCertificate?.url || "",
         paymentCertificateFilename: plain.payment_certificate_filename || logisticRaw.payment?.paymentCertificate?.filename || "",
         orderTime: plain.order_time,
@@ -3244,6 +3512,87 @@ const getManualOrderDetail = async (user, id) => {
     }
 };
 
+const getManualOrderWaybillPdf = async (user, id) => {
+    const order = await findManualOrderForUser(user, id, { includeHistory: false });
+    const apiOrder = toManualOrderApi(order);
+    const rawUrl = normalizeString(order.waybill_pdf_url || apiOrder.waybillPdfUrl);
+    const filename = (order.waybill_pdf_filename || apiOrder.waybillPdfFilename || manualWaybillFilename(order.order_number))
+        .replace(/[\r\n"]/g, '')
+        .replace(/[^A-Za-z0-9_. -]/g, '_');
+
+    if (!rawUrl) {
+        const err = new Error('No waybill PDF is available for this manual order.');
+        err.statusCode = 404;
+        throw err;
+    }
+
+    if (rawUrl.startsWith('/uploads/')) {
+        const uploadRoot = path.resolve(process.env.UPLOAD_PATH || './uploads');
+        const relativePath = rawUrl
+            .split('?')[0]
+            .replace(/^\/uploads\/?/i, '')
+            .replace(/^[/\\]+/, '');
+        const targetPath = path.resolve(uploadRoot, relativePath);
+
+        if (targetPath !== uploadRoot && !targetPath.startsWith(`${uploadRoot}${path.sep}`)) {
+            const err = new Error('Invalid waybill PDF path.');
+            err.statusCode = 400;
+            throw err;
+        }
+        if (!fs.existsSync(targetPath)) {
+            const err = new Error('Stored waybill PDF file was not found on the server.');
+            err.statusCode = 404;
+            throw err;
+        }
+
+        return {
+            type: 'file',
+            filePath: targetPath,
+            filename,
+            contentType: 'application/pdf',
+        };
+    }
+
+    const dataUrlMatch = rawUrl.match(/^data:application\/pdf;base64,(.+)$/i);
+    if (dataUrlMatch) {
+        return {
+            type: 'buffer',
+            buffer: Buffer.from(dataUrlMatch[1], 'base64'),
+            filename,
+            contentType: 'application/pdf',
+        };
+    }
+
+    if (/^[A-Za-z0-9+/=]+$/.test(rawUrl) && rawUrl.length > 200) {
+        return {
+            type: 'buffer',
+            buffer: Buffer.from(rawUrl, 'base64'),
+            filename,
+            contentType: 'application/pdf',
+        };
+    }
+
+    if (/^https?:\/\//i.test(rawUrl)) {
+        const response = await axios.get(rawUrl, {
+            responseType: 'arraybuffer',
+            timeout: EASY_PARCEL_TIMEOUT_MS,
+            headers: { Accept: 'application/pdf,*/*' },
+        });
+        return {
+            type: 'buffer',
+            buffer: Buffer.from(response.data),
+            filename,
+            contentType: String(response.headers?.['content-type'] || '').includes('pdf')
+                ? response.headers['content-type']
+                : 'application/pdf',
+        };
+    }
+
+    const err = new Error('Unsupported waybill PDF source.');
+    err.statusCode = 400;
+    throw err;
+};
+
 const createManualOrder = async (user, body) => {
     const { Warehouse, MerchantSku, CombineSku, SkuWarehouseStock, ManualOrder, ManualOrderItem, PlatformSkuMapping } = require("../../models");
     const companyId = resolveCompanyId(user);
@@ -3297,32 +3646,6 @@ const createManualOrder = async (user, body) => {
         orderNumber,
     });
     let easyParcelPreBooking = null;
-    if (easyParcelBookNow) {
-        try {
-            easyParcelPreBooking = await prepareEasyParcelBooking({
-                warehouse: warehouse.toJSON ? warehouse.toJSON() : warehouse,
-                body: {
-                    ...body,
-                    easyParcel: {
-                        ...easyParcel,
-                        bookNow: true,
-                        sender,
-                        receiverEmail: receiver.email,
-                        selectedRate,
-                        content: packageContent,
-                        parcelValue: Math.max(1, moneyNumber(codAmount || payment.orderValue || payment.subtotal || 1)),
-                    },
-                },
-                orderNumber,
-                type,
-            });
-        } catch (err) {
-            const wrapped = new Error(`Shipment booking failed: ${err.message || "EasyParcel booking failed"}`);
-            wrapped.statusCode = err.statusCode || 502;
-            wrapped.easyParcelResponse = err.easyParcelResponse || null;
-            throw wrapped;
-        }
-    }
     const createdItems = [];
     const affectedMerchantSkuIds = [];
     const platformStockDeductionItems = [];
@@ -3632,6 +3955,11 @@ const submitManualOrderToEasyParcel = async (user, id) => {
     const order = await findManualOrderForUser(user, id, { includeHistory: true });
     const current = toManualOrderApi(order);
     const isCancelledForRepush = normalizeManualStatus(order.status) === MANUAL_ORDER_STATUSES.CANCELLED;
+    if (['pending_review', 'payment_review_required'].includes(normalizeString(order.shipping_wallet_status))) {
+        const err = new Error('This EasyParcel booking has an unresolved wallet/payment review. Please check EasyParcel and resolve the wallet ledger before submitting again.');
+        err.statusCode = 409;
+        throw err;
+    }
     if (!isCancelledForRepush && (current.waybillPdfUrl || current.awbNumber || current.easyParcel?.awbLink)) {
         return {
             message: "Stored EasyParcel waybill is ready",
@@ -4312,6 +4640,11 @@ const finalizePackedPlatformOrder = async (user, body) => {
         throw err;
     }
 
+    await assertStoreSubscriptionActive(
+        await findPlatformStoreFromContext(user, { platform, context }),
+        'order processing'
+    );
+
     const results = [];
     for (const item of items) {
         const payload = {
@@ -4345,6 +4678,37 @@ const addFilter = (filters, field, value) => {
     if (normalized) filters.push({ [field]: normalized });
 };
 
+const findPlatformStoreFromContext = async (user, { platform, context = {}, transaction = null }) => {
+    const { PlatformStore } = require('../../models');
+    const companyId = resolveCompanyId(user);
+    const normalizedPlatform = normalizeString(platform).toLowerCase();
+    const storeFilters = [];
+
+    addFilter(storeFilters, 'id', context.platform_store_id || context.store_id || context.storeId);
+    addFilter(storeFilters, 'external_store_id', context.external_store_id);
+    addFilter(storeFilters, 'store_shop_id', context.shop_id || context.store_shop_id);
+    if (normalizedPlatform === 'shopee') addFilter(storeFilters, 'external_store_id', context.shop_id || context.external_store_id);
+    addFilter(storeFilters, 'store_open_id', context.platform_open_id || context.open_id || context.store_open_id || context.external_store_name);
+    addFilter(storeFilters, 'store_cipher', context.cipher || context.store_cipher || context.external_store_id);
+
+    const store = await PlatformStore.findOne({
+        where: {
+            company_id: companyId,
+            platform: normalizedPlatform,
+            is_active: true,
+            ...(storeFilters.length ? { [Op.or]: storeFilters } : {}),
+        },
+        transaction,
+    });
+
+    if (!store) {
+        const err = new Error('Platform store not found for selected order');
+        err.statusCode = 404;
+        throw err;
+    }
+    return store;
+};
+
 const findPlatformMappingForOrderItem = async (user, { platform, context = {}, item = {}, transaction = null }) => {
     const { PlatformStore, PlatformSkuMapping } = require('../../models');
     const companyId = resolveCompanyId(user);
@@ -4371,6 +4735,7 @@ const findPlatformMappingForOrderItem = async (user, { platform, context = {}, i
         err.statusCode = 404;
         throw err;
     }
+    await assertStoreSubscriptionActive(store, 'SKU mapping', transaction);
 
     const mappingFilters = [];
     if (normalizedPlatform === 'shopee') {
@@ -4604,6 +4969,11 @@ module.exports = {
     finalizePackedPlatformOrder,
     changePlatformOrderSku,
 };
+
+
+
+
+
 
 
 

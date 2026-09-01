@@ -22,6 +22,7 @@ const { startIisLogCleanupScheduler } = require('./workers/iisLogCleanup.schedul
 
 // 4. App init
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || '0.0.0.0';
 
@@ -110,6 +111,10 @@ app.use(
 app.use(
     '/api/v1/platform-order-deductions/tiktok',
     require('./modules/platformOrderDeductions/platformOrderDeductions.routes').publicTikTokRouter
+);
+app.use(
+    '/api/v1/platform-order-activity',
+    require('./modules/orderActivityLogs/orderActivityLogs.routes').publicRouter
 );
 const platformStoresRoutes = require('./modules/platformStores/platformStores.routes');
 const platformStoresController = require('./modules/platformStores/platformStores.controller');

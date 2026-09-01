@@ -22,11 +22,14 @@ const platformOrderDeductionsModule = require('./paths/platformOrderDeductions.p
 const packFailedOrdersModule = require('./paths/packFailedOrders.paths');
 const pushSuccessfulOrdersModule = require('./paths/pushSuccessfulOrders.paths');
 const withdrawOrdersModule = require('./paths/withdrawOrders.paths');
+const orderActivityLogsModule = require('./paths/orderActivityLogs.paths');
 const manualOrdersModule = require('./paths/manualOrders.paths');
 const platformManualOrdersModule = require('./paths/platformManualOrders.paths');
 const dashboardModule = require('./paths/dashboard.paths');
 const autoOrderAcceptModule = require('./paths/autoOrderAccept.paths');
 const returnOrdersModule = require('./paths/returnOrders.paths');
+const subscriptionModule = require('./paths/subscription.paths');
+const adminManagementModule = require('./paths/adminManagement.paths');
 // ✅ Adding a new module = one import line + one entry in the array below
 
 const modules = [
@@ -50,11 +53,14 @@ const modules = [
     packFailedOrdersModule,
     pushSuccessfulOrdersModule,
     withdrawOrdersModule,
+    orderActivityLogsModule,
     manualOrdersModule,
     platformManualOrdersModule,
     dashboardModule,
     autoOrderAcceptModule,
-    returnOrdersModule
+    returnOrdersModule,
+    subscriptionModule,
+    adminManagementModule
 ];
 
 // ── Auto-merge all modules into base ─────────────────────────────────

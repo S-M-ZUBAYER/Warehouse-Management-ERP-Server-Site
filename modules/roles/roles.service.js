@@ -12,6 +12,7 @@ const cacheKey = (companyId, suffix = '') =>
 // Keep this in sync with frontend Sidebar navItems / Role permission modal.
 const DEFAULT_PERMISSIONS = {
     dashboard: { access: true },
+    contact: { access: true },
     product_management: {
         access: false,
         sub: {
@@ -60,6 +61,7 @@ const DEFAULT_PERMISSIONS = {
                 },
             },
             manual_order: false,
+            platform_manual_order: false,
         },
     },
     warehouse_management: { access: false },
@@ -121,8 +123,9 @@ const buildPermissions = (supplied = {}) => {
         }
     }
 
-    // Dashboard is mandatory for every role.
+    // Dashboard and Contact are mandatory for every role.
     result.dashboard.access = true;
+    result.contact.access = true;
 
     return result;
 };
@@ -389,6 +392,11 @@ const getPermissionTemplate = () => {
                 hasSub: false,
             },
             {
+                key: 'contact',
+                label: 'Contact',
+                hasSub: false,
+            },
+            {
                 key: 'product_management',
                 label: 'Product Management',
                 hasSub: true,
@@ -413,6 +421,7 @@ const getPermissionTemplate = () => {
                             { key: 'inbound_complete', label: 'Inbound Complete' },
                         ]
                     },
+                    { key: 'outbound_order', label: 'Outbound Order' },
                 ],
             },
             {
@@ -434,6 +443,7 @@ const getPermissionTemplate = () => {
                         ]
                     },
                     { key: 'manual_order', label: 'Manual Order' },
+                    { key: 'platform_manual_order', label: 'Platform Manual Order' },
                 ],
             },
             {

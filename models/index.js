@@ -1,7 +1,7 @@
-'use strict';
+﻿'use strict';
 const { sequelize } = require('../config/database');
 
-// ─── Import all models ────────────────────────────────────────────────────────
+// â”€â”€â”€ Import all models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const Company = require('./Company')(sequelize);
 const Role = require('./Role')(sequelize);
 const User = require('./User')(sequelize);
@@ -10,23 +10,23 @@ const UserStorePermission = require('./UserStorePermission')(sequelize);
 const UserWarehousePermission = require('./UserWarehousePermission')(sequelize);
 const Warehouse = require('./Warehouse')(sequelize);
 
-// ── Inventory: SKU management ─────────────────────────────────────────────────
+// â”€â”€ Inventory: SKU management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Use the updated versions that include the new associations
 const MerchantSku = require('./MerchantSku')(sequelize);       // updated version
 const CombineSku = require('./CombineSku')(sequelize);        // updated version
 const CombineSkuItem = require('./CombineSkuItem')(sequelize);
 
-// ── Inventory: Stock ──────────────────────────────────────────────────────────
+// â”€â”€ Inventory: Stock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const SkuWarehouseStock = require('./SkuWarehouseStock')(sequelize);   // NEW
 const StockLedgerEntry = require('./StockLedgerEntry')(sequelize);    // NEW
 
-// ── Inventory: Inbound ────────────────────────────────────────────────────────
+// â”€â”€ Inventory: Inbound â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const InboundOrder = require('./InboundOrder')(sequelize);        // NEW
 const InboundOrderLine = require('./InboundOrderLine')(sequelize);    // NEW
 const OutboundOrder = require('./OutboundOrder')(sequelize);
 const OutboundOrderLine = require('./OutboundOrderLine')(sequelize);
 
-// ── Platform integration ──────────────────────────────────────────────────────
+// â”€â”€ Platform integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const PlatformStore = require('./PlatformStore')(sequelize);       // NEW
 const PlatformSkuMapping = require('./PlatformSkuMapping')(sequelize);  // NEW
 const OrderSaleLine = require('./OrderSaleLine')(sequelize);       // NEW
@@ -43,8 +43,21 @@ const PlatformManualOrderItem = require('./PlatformManualOrderItem')(sequelize);
 const ReturnOrder = require('./ReturnOrder')(sequelize);
 const ReturnOrderLine = require('./ReturnOrderLine')(sequelize);
 const ReturnOrderSyncState = require('./ReturnOrderSyncState')(sequelize);
+const BillingPlan = require('./BillingPlan')(sequelize);
+const BillingPlanTranslation = require('./BillingPlanTranslation')(sequelize);
+const BillingPlanFeature = require('./BillingPlanFeature')(sequelize);
+const BillingPlanPrice = require('./BillingPlanPrice')(sequelize);
+const StoreSubscription = require('./StoreSubscription')(sequelize);
+const SubscriptionPayment = require('./SubscriptionPayment')(sequelize);
+const Coupon = require('./Coupon')(sequelize);
+const CouponRedemption = require('./CouponRedemption')(sequelize);
+const Gift = require('./Gift')(sequelize);
+const GiftStatusHistory = require('./GiftStatusHistory')(sequelize);
+const CompanyShippingWallet = require('./CompanyShippingWallet')(sequelize);
+const CompanyShippingWalletLedger = require('./CompanyShippingWalletLedger')(sequelize);
+const PlatformOrderActivityLog = require('./PlatformOrderActivityLog')(sequelize);
 
-// ── MerchantSku Sync integration ──────────────────────────────────────────────────────
+// â”€â”€ MerchantSku Sync integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const MerchantSkuSyncGroup=require('./MerchantSkuSyncGroup')(sequelize);   //New
 const MerchantSkuSyncMember=require('./MerchantSkuSyncMember')(sequelize);   //New
 
@@ -113,13 +126,28 @@ const models = {
     ReturnOrderLine,
     ReturnOrderSyncState,
     MerchantSkuSyncGroup,
-    MerchantSkuSyncMember
+    MerchantSkuSyncMember,
+    BillingPlan,
+    BillingPlanTranslation,
+    BillingPlanFeature,
+    BillingPlanPrice,
+    StoreSubscription,
+    SubscriptionPayment,
+    Coupon,
+    CouponRedemption,
+    Gift,
+    GiftStatusHistory,
+    CompanyShippingWallet,
+    CompanyShippingWalletLedger,
+    PlatformOrderActivityLog
     // Add here as you uncomment above
 };
 
-// ─── Run all associations ─────────────────────────────────────────────────────
+// â”€â”€â”€ Run all associations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Object.values(models).forEach((model) => {
     if (model?.associate) model.associate(models);
 });
 
 module.exports = models;
+
+

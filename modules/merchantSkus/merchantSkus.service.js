@@ -134,13 +134,15 @@ const getMerchantSkus = async (user, filters = {}) => {
 
     const {
         page = 1, limit = 20,
-        search, warehouseId, status,
+        search, warehouseId, stockWarehouseId, status,
         country, sortBy = 'created_at', sortOrder = 'DESC',
     } = filters;
 
     const where = { company_id: user.companyId, deleted_at: null };
 
-    if (warehouseId && warehouseId !== 'all') {
+    if (stockWarehouseId && stockWarehouseId !== 'all') {
+        await assertWarehousePermission(user, stockWarehouseId);
+    } else if (warehouseId && warehouseId !== 'all') {
         await assertWarehousePermission(user, warehouseId);
         where.warehouse_id = warehouseId;
     } else {
@@ -180,13 +182,14 @@ const getMerchantSkus = async (user, filters = {}) => {
                 required: false,
             },
             {
-                // Pull stock for the SKU's assigned warehouse (or all warehouses if no filter)
                 model: SkuWarehouseStock,
                 as: 'stock',
                 attributes: ['qty_on_hand', 'qty_reserved', 'qty_inbound', 'warehouse_id', 'min_stock'],
-                required: false,
-                where: warehouseId && warehouseId !== 'all'
-                    ? { warehouse_id: warehouseId }
+                required: !!(stockWarehouseId && stockWarehouseId !== 'all'),
+                where: stockWarehouseId && stockWarehouseId !== 'all'
+                    ? { warehouse_id: stockWarehouseId }
+                    : warehouseId && warehouseId !== 'all'
+                        ? { warehouse_id: warehouseId }
                     : undefined,
             },
         ],
@@ -196,6 +199,22 @@ const getMerchantSkus = async (user, filters = {}) => {
         distinct: true,
     });
 
+    const stockWarehouseIds = [
+        ...new Set(rows.flatMap((sku) => {
+            const stockRows = sku.stock || [];
+            const stockArray = Array.isArray(stockRows) ? stockRows : [stockRows];
+            return stockArray.map((stock) => stock?.warehouse_id).filter(Boolean);
+        })),
+    ];
+    const stockWarehouses = stockWarehouseIds.length
+        ? await Warehouse.findAll({
+            where: await applyWarehouseScope(user, { id: { [Op.in]: stockWarehouseIds } }),
+            attributes: ['id', 'name', 'code'],
+            raw: true,
+        })
+        : [];
+    const stockWarehouseById = new Map(stockWarehouses.map((warehouse) => [Number(warehouse.id), warehouse]));
+
     let data = rows.map(sku => {
         const stockRows = sku.stock || [];
         const stockArray = Array.isArray(stockRows) ? stockRows : [stockRows];
@@ -204,11 +223,30 @@ const getMerchantSkus = async (user, filters = {}) => {
             reserved: acc.reserved + (s?.qty_reserved || 0),
             inbound: acc.inbound + (s?.qty_inbound || 0),
         }), { on_hand: 0, reserved: 0, inbound: 0 });
+        const stockWarehouseRows = stockArray
+            .map((stock) => {
+                const warehouse = stockWarehouseById.get(Number(stock?.warehouse_id));
+                if (!stock?.warehouse_id || !warehouse) return null;
+                return {
+                    warehouse_id: stock.warehouse_id,
+                    warehouse_name: warehouse.name,
+                    warehouse_code: warehouse.code,
+                    qty_on_hand: stock.qty_on_hand || 0,
+                    qty_reserved: stock.qty_reserved || 0,
+                    qty_inbound: stock.qty_inbound || 0,
+                    available_in_inventory: Math.max(0, (stock.qty_on_hand || 0) - (stock.qty_reserved || 0)),
+                };
+            })
+            .filter(Boolean);
+        const stockWarehouseNames = [...new Set(stockWarehouseRows.map((warehouse) => warehouse.warehouse_name).filter(Boolean))];
 
         return {
             ...sku.toJSON(),
             available_in_inventory: Math.max(0, totals.on_hand - totals.reserved),
             in_transit_inventory: totals.inbound,
+            stock_warehouses: stockWarehouseRows,
+            stock_warehouse_names: stockWarehouseNames,
+            stock_warehouse_name: stockWarehouseNames.length === 1 ? stockWarehouseNames[0] : null,
         };
     });
 

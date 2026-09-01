@@ -4,6 +4,7 @@ const { body, query } = require('express-validator');
 // ─── Permission pages visible in UI (from the Add Role modal) ────────────────
 const VALID_PAGES = [
     'dashboard',
+    'contact',
     'product_management',
     'inventory_management',
     'order_management',
@@ -31,6 +32,10 @@ const createRoleValidator = [
     body('permissions.dashboard')
         .optional({ values: 'falsy' })
         .isObject().withMessage('dashboard permission must be an object'),
+
+    body('permissions.contact')
+        .optional({ values: 'falsy' })
+        .isObject().withMessage('contact permission must be an object'),
 
     body('permissions.product_management')
         .optional({ values: 'falsy' })

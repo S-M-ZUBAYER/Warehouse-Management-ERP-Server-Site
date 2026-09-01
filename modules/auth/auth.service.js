@@ -84,6 +84,9 @@ const registerAdmin = async (data) => {
                 "dashboard": {
                     "access": true
                 },
+                "contact": {
+                    "access": true
+                },
                 "product_management": {
                     "access": true,
                     "sub": {
@@ -102,7 +105,8 @@ const registerAdmin = async (data) => {
                                 "inbound_on_the_way": true,
                                 "inbound_complete": true
                             }
-                        }
+                        },
+                        "outbound_order": true
                     }
                 },
                 "order_management": {
@@ -119,7 +123,8 @@ const registerAdmin = async (data) => {
                                 "canceled_order": true
                             }
                         },
-                        "manual_order": true
+                        "manual_order": true,
+                        "platform_manual_order": true
                     }
                 },
                 "warehouse_management": {

@@ -12,6 +12,7 @@ const isOwner = (user) => String(user?.role || '').toLowerCase() === 'owner' || 
 
 const permissionPathMap = {
   dashboard: ['dashboard'],
+  contact: ['contact'],
   product_list: ['product_management', 'product_list'],
   combine_sku: ['product_management', 'combine_sku'],
   merchant_sku: ['inventory_management', 'merchant_sku'],
@@ -37,6 +38,7 @@ const permissionPathMap = {
   canceled_order: ['order_management', 'order_processing', 'canceled_order'],
   return_order: ['order_management', 'order_processing', 'return_order'],
   manual_order: ['order_management', 'manual_order'],
+  platform_manual_order: ['order_management', 'platform_manual_order'],
   warehouse_management: ['warehouse_management'],
   store_authorization: ['system_configuration', 'store_authorization'],
   account_management: ['system_configuration', 'account_management'],
@@ -45,7 +47,17 @@ const permissionPathMap = {
 };
 
 const hasPermissionPath = (permissionsInput, pathOrKey) => {
+  if (pathOrKey === 'dashboard' || pathOrKey === 'contact') return true;
   const permissions = parsePermissions(permissionsInput);
+  if (pathOrKey === 'platform_manual_order') {
+    const orderManagement = permissions?.order_management;
+    const orderSub = orderManagement?.sub;
+    const hasPlatformKey = orderSub && Object.prototype.hasOwnProperty.call(orderSub, 'platform_manual_order');
+    if (orderManagement?.access === true && orderSub && !hasPlatformKey) {
+      const legacyManualOrder = orderSub.manual_order;
+      if (legacyManualOrder === true || legacyManualOrder?.access === true) return true;
+    }
+  }
   const path = Array.isArray(pathOrKey) ? pathOrKey : (permissionPathMap[pathOrKey] || [pathOrKey]);
   if (!path.length) return true;
 

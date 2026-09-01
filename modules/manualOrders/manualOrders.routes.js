@@ -1,7 +1,8 @@
-'use strict';
+﻿'use strict';
 
 const express = require('express');
 const { body, query } = require('express-validator');
+const { requireRole } = require('../../middlewares/auth');
 const ctrl = require('./manualOrders.controller');
 
 const router = express.Router();
@@ -110,7 +111,19 @@ router.post('/manual-orders/aftership/label-details', [
     body('orderId').optional().isString(),
     body('order_id').optional().isString(),
 ], ctrl.getAfterShipLabelDetails);
+router.get('/manual-orders/shipping-wallet', ctrl.getShippingWallet);
+router.get('/manual-orders/shipping-wallet/ledger', [
+    query('limit').optional().isInt({ min: 1, max: 200 }),
+], ctrl.listShippingWalletLedger);
+router.post('/manual-orders/shipping-wallet/checkout', requireRole('owner'), [
+    body('amount').notEmpty().isFloat({ min: 0.01 }).withMessage('amount is required'),
+    body('currency').optional().trim().isLength({ min: 3, max: 3 }),
+], ctrl.createShippingWalletCheckout);
+router.post('/manual-orders/shipping-wallet/checkout/complete', requireRole('owner'), [
+    body('sessionId').trim().notEmpty().isLength({ max: 255 }),
+], ctrl.completeShippingWalletCheckout);
 router.get('/manual-orders', ctrl.listManualOrders);
+router.get('/manual-orders/:id/waybill-pdf', ctrl.getManualOrderWaybillPdf);
 router.get('/manual-orders/:id', ctrl.getManualOrderDetail);
 router.post('/manual-orders/:id/easyparcel/submit', ctrl.submitManualOrderToEasyParcel);
 router.post('/manual-orders/:id/aftership/submit', ctrl.submitManualOrderToAfterShip);
@@ -184,3 +197,5 @@ router.post('/platform-orders/pack-stock', [
 ], ctrl.finalizePackedPlatformOrder);
 
 module.exports = router;
+
+

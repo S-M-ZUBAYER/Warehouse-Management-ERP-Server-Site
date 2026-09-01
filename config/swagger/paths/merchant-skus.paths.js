@@ -22,6 +22,23 @@ module.exports = {
                 status: { type: 'string', enum: ['active', 'inactive'], example: 'active' },
                 available_in_inventory: { type: 'integer', example: 150, description: 'Available stock count' },
                 in_transit_inventory: { type: 'integer', example: 50, description: 'In-transit stock count' },
+                stock_warehouse_name: { type: 'string', nullable: true, example: 'CE BEE Logistics', description: 'Single stock warehouse name when the result is filtered to one stock warehouse' },
+                stock_warehouse_names: { type: 'array', items: { type: 'string' }, example: ['TIMOZIA-MY', 'Grozziie', 'CE BEE Logistics'], description: 'Warehouse names that have stock rows for this SKU' },
+                stock_warehouses: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            warehouse_id: { type: 'integer', example: 19 },
+                            warehouse_name: { type: 'string', example: 'CE BEE Logistics' },
+                            warehouse_code: { type: 'string', nullable: true, example: 'WH-005' },
+                            qty_on_hand: { type: 'integer', example: 20 },
+                            qty_reserved: { type: 'integer', example: 2 },
+                            qty_inbound: { type: 'integer', example: 0 },
+                            available_in_inventory: { type: 'integer', example: 18 },
+                        },
+                    },
+                },
                 warehouse: {
                     type: 'object',
                     properties: {
@@ -133,7 +150,8 @@ module.exports = {
                     { in: 'query', name: 'page', schema: { type: 'integer', minimum: 1, default: 1 }, description: 'Page number' },
                     { in: 'query', name: 'limit', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, description: 'Items per page' },
                     { in: 'query', name: 'search', schema: { type: 'string', maxLength: 100, example: 'wireless' }, description: 'Search by SKU name or title' },
-                    { in: 'query', name: 'warehouseId', schema: { type: 'integer', example: 1 }, description: 'Filter by warehouse ID' },
+                    { in: 'query', name: 'warehouseId', schema: { type: 'integer', example: 1 }, description: 'Filter by Merchant SKU master warehouse ID' },
+                    { in: 'query', name: 'stockWarehouseId', schema: { type: 'integer', example: 19 }, description: 'Filter by stock warehouse ID. Returns SKUs that have a stock row in this warehouse, regardless of their master warehouse.' },
                     { in: 'query', name: 'status', schema: { type: 'string', enum: ['active', 'inactive', 'all', 'in_stock', 'out_of_stock'], default: 'all' }, description: 'Filter by status or stock level' },
                     { in: 'query', name: 'country', schema: { type: 'string', example: 'Malaysia' }, description: 'Filter by country' },
                     { in: 'query', name: 'sortBy', schema: { type: 'string', enum: ['created_at', 'updated_at', 'sku_name', 'sku_title'], default: 'created_at' }, description: 'Sort field' },

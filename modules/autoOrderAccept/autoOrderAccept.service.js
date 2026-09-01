@@ -8,6 +8,7 @@ const DEFAULT_DAYS = '0,1,2,3,4,5,6';
 const SECONDS_IN_DAY = 24 * 60 * 60;
 const MAX_ORDERS_PER_STORE = Math.max(1, Number(process.env.AUTO_ORDER_ACCEPT_MAX_ORDERS_PER_STORE || 25));
 const PLATFORM_TIMEOUT_MS = Math.max(5000, Number(process.env.AUTO_ORDER_ACCEPT_PLATFORM_TIMEOUT_MS || 30000));
+const TIKTOK_ORDER_DETAIL_PATH = process.env.TIKTOK_ORDER_DETAIL_PATH || '/tiktokshop-partner-country/api/dev/order/details';
 
 const normalizeBaseUrl = (value) => String(value || '').replace(/\/+$/, '');
 const JAVA_API_BASE_URL = normalizeBaseUrl(
@@ -24,6 +25,10 @@ const javaApi = axios.create({
 });
 
 const runningStoreKeys = new Set();
+const PLATFORM_DB_VALUES = {
+    shopee: ['shopee', 'Shopee', 'SHOPEE'],
+    tiktok: ['tiktok', 'TikTok', 'Tiktok', 'TIKTOK'],
+};
 
 const normalizeString = (value) => {
     if (value === undefined || value === null) return null;
@@ -76,10 +81,16 @@ const getStoreShopId = (store) =>
     normalizeString(store.store_shop_id) || normalizeString(store.external_store_id);
 
 const getStoreOpenId = (store) =>
-    normalizeString(store.store_open_id);
+    normalizeString(store.store_open_id) ||
+    normalizeString(store.open_id) ||
+    normalizeString(store.platform_open_id) ||
+    normalizeString(store.external_store_name);
 
 const getStoreCipher = (store) =>
-    normalizeString(store.store_cipher);
+    normalizeString(store.store_cipher) ||
+    normalizeString(store.cipher) ||
+    normalizeString(store.auth_cipher) ||
+    normalizeString(store.external_store_id);
 
 const getOrderId = (platform, order = {}) =>
     platform === 'shopee'
@@ -91,7 +102,15 @@ const getTikTokOrderItems = (order = {}) => Array.isArray(order.lineItems)
     ? order.lineItems
     : Array.isArray(order.line_items)
         ? order.line_items
-        : [];
+        : Array.isArray(order.items)
+            ? order.items
+            : Array.isArray(order.skus)
+                ? order.skus
+                : Array.isArray(order.orderLineItems)
+                    ? order.orderLineItems
+                    : Array.isArray(order.order_line_items)
+                        ? order.order_line_items
+                        : [];
 
 const getOrderItems = (platform, order = {}) =>
     platform === 'shopee' ? getShopeeOrderItems(order) : getTikTokOrderItems(order);
@@ -336,6 +355,15 @@ const checkOrderEligibility = async ({ store, platform, order }) => {
     return { eligible: true, reason: null };
 };
 
+const canTikTokFollowManualPackFlow = (eligibility = {}) => {
+    const reason = String(eligibility.reason || '').toLowerCase();
+    return [
+        'order items are missing',
+        'platform item identifiers are missing',
+        'platform sku mapping not found',
+    ].includes(reason);
+};
+
 const getPreferredShopeePickup = (shippingParamData) => {
     const pickupList = shippingParamData?.body?.response?.pickup?.address_list || [];
 
@@ -410,16 +438,96 @@ const shipShopeeOrder = async (store, order) => {
 
 const getTikTokOrderPackageId = (order = {}) =>
     normalizeString(order.lineItems?.[0]?.packageId) ||
+    normalizeString(order.lineItems?.[0]?.package_id) ||
+    normalizeString(order.line_items?.[0]?.packageId) ||
     normalizeString(order.line_items?.[0]?.package_id) ||
+    normalizeString(order.items?.[0]?.packageId) ||
+    normalizeString(order.items?.[0]?.package_id) ||
+    normalizeString(order.packageList?.[0]?.packageId) ||
+    normalizeString(order.packageList?.[0]?.package_id) ||
+    normalizeString(order.package_list?.[0]?.packageId) ||
+    normalizeString(order.package_list?.[0]?.package_id) ||
+    normalizeString(order.packages?.[0]?.id) ||
+    normalizeString(order.packages?.[0]?.packageId) ||
+    normalizeString(order.packages?.[0]?.package_id) ||
     normalizeString(order.packageId) ||
-    normalizeString(order.package_id);
+    normalizeString(order.package_id) ||
+    normalizeString(order.pkgNo) ||
+    normalizeString(order.packageNo) ||
+    normalizeString(order.package_no) ||
+    normalizeString(order.id) ||
+    normalizeString(order.order_id) ||
+    normalizeString(order.orderId);
 
 const getTikTokShippingProviderId = (order = {}) =>
     normalizeString(order.shippingProviderId) ||
     normalizeString(order.shipping_provider_id) ||
     normalizeString(order.shippingProvider?.id) ||
     normalizeString(order.shipping_provider?.id) ||
+    normalizeString(order.packageList?.[0]?.shippingProviderId) ||
+    normalizeString(order.packageList?.[0]?.shipping_provider_id) ||
+    normalizeString(order.package_list?.[0]?.shippingProviderId) ||
+    normalizeString(order.package_list?.[0]?.shipping_provider_id) ||
+    normalizeString(order.packages?.[0]?.shippingProviderId) ||
+    normalizeString(order.packages?.[0]?.shipping_provider_id) ||
     '';
+
+const getTikTokDetailOrders = (response = {}) => {
+    const payload = response?.data || response?.body?.data || response?.response || response?.body?.response || response || {};
+    const candidates = [
+        payload.orders,
+        payload.order_list,
+        payload.orderList,
+        payload.order,
+        payload.data?.orders,
+        payload.data?.order_list,
+        payload.data?.orderList,
+        payload.data?.order,
+    ];
+
+    for (const candidate of candidates) {
+        if (Array.isArray(candidate)) return candidate;
+        if (candidate && typeof candidate === 'object') return [candidate];
+    }
+
+    return payload?.orderId || payload?.order_id || payload?.id ? [payload] : [];
+};
+
+const mergeTikTokOrderDetail = (order = {}, detail = {}) => {
+    if (!detail || !Object.keys(detail).length) return order;
+
+    const listItems = getTikTokOrderItems(order);
+    const detailItems = getTikTokOrderItems(detail);
+    const merged = { ...order, ...detail };
+
+    if (detailItems.length) {
+        merged.lineItems = detailItems.map((item, index) => {
+            const listItem = listItems[index] || {};
+            return {
+                ...listItem,
+                ...item,
+                packageId:
+                    item.packageId ??
+                    item.package_id ??
+                    listItem.packageId ??
+                    listItem.package_id ??
+                    order.packageId ??
+                    order.package_id,
+                package_id:
+                    item.package_id ??
+                    item.packageId ??
+                    listItem.package_id ??
+                    listItem.packageId ??
+                    order.package_id ??
+                    order.packageId,
+            };
+        });
+    } else if (listItems.length) {
+        merged.lineItems = listItems;
+    }
+
+    return merged;
+};
 
 const isTikTokShipSuccess = (result) => {
     const code = result?.code ?? result?.data?.code ?? result?.body?.code;
@@ -549,7 +657,24 @@ const fetchTikTokReadyOrders = async (store) => {
         pageToken = payload?.nextPageToken || payload?.next_page_token || '';
     } while (pageToken && orders.length < MAX_ORDERS_PER_STORE);
 
-    return orders;
+    const orderIds = orders.map((order) => getOrderId('tiktok', order)).filter(Boolean);
+    if (!orderIds.length) return orders;
+
+    const details = [];
+    for (const batch of chunk(orderIds, 30)) {
+        const detailRes = await requestJava(TIKTOK_ORDER_DETAIL_PATH, {
+            params: {
+                openId,
+                cipher,
+                orderIds: batch.join(','),
+            },
+        });
+        details.push(...getTikTokDetailOrders(detailRes));
+    }
+
+    if (!details.length) return orders;
+    const detailMap = new Map(details.map((order) => [getOrderId('tiktok', order), order]).filter(([orderId]) => orderId));
+    return orders.map((order) => mergeTikTokOrderDetail(order, detailMap.get(getOrderId('tiktok', order))));
 };
 
 const fetchReadyOrders = async (store) =>
@@ -611,6 +736,7 @@ const processStore = async (store, { now = new Date() } = {}) => {
     const platform = normalizePlatform(store.platform);
     const storeId = store.id;
     const companyId = Number(store.company_id);
+    const subscriptionService = require('../subscription/subscription.service');
     const result = {
         storeId,
         storeName: store.store_name,
@@ -640,6 +766,16 @@ const processStore = async (store, { now = new Date() } = {}) => {
 
     runningStoreKeys.add(runningKey);
     try {
+        const subscriptionActive = await subscriptionService.isStoreSubscriptionActive(store);
+        if (!subscriptionActive) {
+            result.skipped = 1;
+            result.skippedOrders.push({ orderId: null, reason: 'Subscription expired for this store' });
+            if (store.auto_order_accept) {
+                await store.update({ auto_order_accept: false });
+            }
+            return result;
+        }
+
         const failedIds = await getFailedPackOrderIds({ companyId, platform, storeId });
         const orders = await fetchReadyOrders(store);
 
@@ -659,6 +795,17 @@ const processStore = async (store, { now = new Date() } = {}) => {
             result.checked += 1;
             const eligibility = await checkOrderEligibility({ store, platform, order });
             if (!eligibility.eligible) {
+                if (platform === 'tiktok' && canTikTokFollowManualPackFlow(eligibility)) {
+                    try {
+                        await shipOrder(store, platform, order);
+                        result.packed += 1;
+                        result.successfulIds.push(orderId);
+                    } catch (error) {
+                        result.failed += 1;
+                        result.failedOrders.push({ orderId, reason: error?.message || 'Auto Order Accept failed' });
+                    }
+                    continue;
+                }
                 result.skipped += 1;
                 result.skippedOrders.push({ orderId, reason: eligibility.reason || 'Order is not eligible' });
                 continue;
@@ -691,11 +838,11 @@ const buildStoreWhere = async ({ user, filters = {} }) => {
     const where = {
         auto_order_accept: true,
         is_active: true,
-        platform: { [Op.in]: ['shopee', 'tiktok'] },
+        platform: { [Op.in]: [...PLATFORM_DB_VALUES.shopee, ...PLATFORM_DB_VALUES.tiktok] },
     };
 
     if (user?.companyId) where.company_id = user.companyId;
-    if (platform && platform !== 'all') where.platform = platform;
+    if (platform && platform !== 'all') where.platform = { [Op.in]: PLATFORM_DB_VALUES[platform] || [platform] };
     if (storeId && storeId.toLowerCase() !== 'all') where.id = Number(storeId);
 
     if (user) {

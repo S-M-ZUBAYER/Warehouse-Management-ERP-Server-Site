@@ -1,7 +1,8 @@
-'use strict';
+﻿'use strict';
 
 const { validationResult } = require('express-validator');
 const service = require('./manualOrders.service');
+const shippingWalletService = require('./manualOrderShippingWallet.service');
 
 const validationErrors = (errors) => errors.array().map((error) => ({
     field: error.path,
@@ -130,6 +131,43 @@ const refreshEasyParcelToken = async (req, res, next) => {
     }
 };
 
+const getShippingWallet = async (req, res, next) => {
+    try {
+        const data = await shippingWalletService.getWalletSummary(req.user);
+        return res.json({ status: true, data });
+    } catch (err) {
+        next(err);
+    }
+};
+
+const listShippingWalletLedger = async (req, res, next) => {
+    try {
+        const data = await shippingWalletService.listLedger(req.user, req.query || {});
+        return res.json({ status: true, data });
+    } catch (err) {
+        next(err);
+    }
+};
+
+const createShippingWalletCheckout = async (req, res, next) => {
+    try {
+        if (!handleValidation(req, res)) return;
+        const data = await shippingWalletService.createTopUpCheckoutSession(req.user, req.body || {});
+        return res.status(201).json({ status: true, data, message: 'Shipping wallet checkout session created successfully' });
+    } catch (err) {
+        next(err);
+    }
+};
+
+const completeShippingWalletCheckout = async (req, res, next) => {
+    try {
+        if (!handleValidation(req, res)) return;
+        const data = await shippingWalletService.completeTopUpCheckoutSession(req.user, req.body || {});
+        return res.json({ status: true, data, message: 'Shipping wallet payment confirmed successfully' });
+    } catch (err) {
+        next(err);
+    }
+};
 const listManualOrders = async (req, res, next) => {
     try {
         const data = await service.listManualOrders(req.user, req.query);
@@ -154,6 +192,24 @@ const getManualOrderDetail = async (req, res, next) => {
     try {
         const data = await service.getManualOrderDetail(req.user, req.params.id);
         return res.json({ status: true, data });
+    } catch (err) {
+        next(err);
+    }
+};
+
+const getManualOrderWaybillPdf = async (req, res, next) => {
+    try {
+        const pdf = await service.getManualOrderWaybillPdf(req.user, req.params.id);
+        const disposition = req.query.download === 'true' ? 'attachment' : 'inline';
+
+        res.setHeader('Content-Type', pdf.contentType || 'application/pdf');
+        res.setHeader('Content-Disposition', `${disposition}; filename="${pdf.filename || 'waybill.pdf'}"`);
+        res.setHeader('Cache-Control', 'private, max-age=300');
+
+        if (pdf.type === 'file') {
+            return res.sendFile(pdf.filePath);
+        }
+        return res.end(pdf.buffer);
     } catch (err) {
         next(err);
     }
@@ -306,9 +362,14 @@ module.exports = {
     exchangeEasyParcelOAuthCode,
     updateEasyParcelTokens,
     refreshEasyParcelToken,
+    getShippingWallet,
+    listShippingWalletLedger,
+    createShippingWalletCheckout,
+    completeShippingWalletCheckout,
     listManualOrders,
     listAfterShipManualParcels,
     getManualOrderDetail,
+    getManualOrderWaybillPdf,
     createManualOrder,
     submitManualOrderToEasyParcel,
     submitManualOrderToAfterShip,
@@ -324,3 +385,4 @@ module.exports = {
     changePlatformOrderSku,
     finalizePackedPlatformOrder,
 };
+
