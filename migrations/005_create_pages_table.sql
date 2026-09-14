@@ -104,7 +104,8 @@ INSERT INTO `pages` (`key`, `label`, `parent_id`, `level`, `has_sub`, `order`) V
 ('shipped_order',   'Shipped Order',   (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_processing') AS t), 3, 0, 3),
 ('completed_order', 'Completed',       (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_processing') AS t), 3, 0, 4),
 ('all_order',       'All Order',       (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_processing') AS t), 3, 0, 5),
-('canceled_order',  'Canceled Order',  (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_processing') AS t), 3, 0, 6);
+('return_order',    'Return Order',    (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_processing') AS t), 3, 0, 6),
+('canceled_order',  'Canceled Order',  (SELECT id FROM (SELECT id FROM `pages` WHERE `key` = 'order_processing') AS t), 3, 0, 7);
 
 -- Account Management → sub-sub
 INSERT INTO `pages` (`key`, `label`, `parent_id`, `level`, `has_sub`, `order`) VALUES

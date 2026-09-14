@@ -78,7 +78,7 @@ const getStockByMerchantSku = async (user, merchantSkuId) => {
     }
 
     const stockRows = await SkuWarehouseStock.findAll({
-        where: { merchant_sku_id: merchantSkuId, company_id: user.companyId },
+        where: await applyWarehouseScope(user, { merchant_sku_id: merchantSkuId, company_id: user.companyId }, 'warehouse_id'),
         include: [{ model: Warehouse, as: 'warehouse', attributes: ['id', 'name', 'code'] }],
         order: [['warehouse_id', 'ASC']],
     });

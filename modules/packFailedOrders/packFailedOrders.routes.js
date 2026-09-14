@@ -4,6 +4,7 @@ const express = require('express');
 const { body, query } = require('express-validator');
 
 const ctrl = require('./packFailedOrders.controller');
+const { requireOrderReadAccess, requireOrderPackAccess } = require('../../utils/orderPermissions');
 
 const router = express.Router();
 
@@ -36,8 +37,8 @@ const deleteValidator = [
     body('orderIds.*').notEmpty().withMessage('orderId is required').trim().isLength({ min: 1, max: 100 }),
 ];
 
-router.get('/pack-failed-orders', listValidator, ctrl.listPackFailedOrders);
-router.post('/pack-failed-orders', upsertValidator, ctrl.upsertPackFailedOrders);
-router.delete('/pack-failed-orders', deleteValidator, ctrl.deletePackFailedOrders);
+router.get('/pack-failed-orders', requireOrderReadAccess, listValidator, ctrl.listPackFailedOrders);
+router.post('/pack-failed-orders', requireOrderPackAccess, upsertValidator, ctrl.upsertPackFailedOrders);
+router.delete('/pack-failed-orders', requireOrderPackAccess, deleteValidator, ctrl.deletePackFailedOrders);
 
 module.exports = router;

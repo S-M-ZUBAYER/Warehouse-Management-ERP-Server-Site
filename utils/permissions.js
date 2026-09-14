@@ -91,6 +91,16 @@ const requirePageAccess = (permissionKey) => (req, res, next) => {
   });
 };
 
+const requireAnyPageAccess = (permissionKeys) => (req, res, next) => {
+  if (!req.user) return res.status(401).json({ success: false, message: 'Unauthenticated' });
+  if (isOwner(req.user) || permissionKeys.some((key) => hasPermissionPath(req.user.permissions, key))) return next();
+  return res.status(403).json({
+    success: false,
+    message: 'Access denied. You do not have permission for this page.',
+    requiredPermissions: permissionKeys,
+  });
+};
+
 const getPermittedStoreIds = async (user, { canEdit = false } = {}) => {
   if (isOwner(user)) return null;
   const { UserStorePermission } = require('../models');
@@ -179,6 +189,7 @@ module.exports = {
   permissionPathMap,
   hasPermissionPath,
   requirePageAccess,
+  requireAnyPageAccess,
   getPermittedStoreIds,
   hasStorePermission,
   assertStorePermission,

@@ -630,6 +630,7 @@ const getOutboundOrderById = async (user, outboundOrderId) => {
         err.statusCode = 404;
         throw err;
     }
+    await assertWarehousePermission(user, order.warehouse_id);
     await hydrateOutboundStockAvailability(user.companyId, order);
     return order;
 };
@@ -754,7 +755,7 @@ const createOutboundOrder = async (user, data) => {
 const updateDraftOutbound = async (user, outboundOrderId, data) => {
     const { OutboundOrder, OutboundOrderLine } = require('../../models');
     const order = await OutboundOrder.findOne({
-        where: { id: outboundOrderId, company_id: user.companyId, deleted_at: null },
+        where: await applyWarehouseScope(user, { id: outboundOrderId, company_id: user.companyId, deleted_at: null }, 'warehouse_id', { canEdit: true }),
     });
     if (!order) {
         const err = new Error('Outbound order not found');
@@ -807,7 +808,7 @@ const updateDraftOutbound = async (user, outboundOrderId, data) => {
 const deleteDraftOutbound = async (user, outboundOrderId) => {
     const { OutboundOrder } = require('../../models');
     const order = await OutboundOrder.findOne({
-        where: { id: outboundOrderId, company_id: user.companyId, deleted_at: null },
+        where: await applyWarehouseScope(user, { id: outboundOrderId, company_id: user.companyId, deleted_at: null }, 'warehouse_id', { canEdit: true }),
     });
     if (!order) {
         const err = new Error('Outbound order not found');
@@ -826,7 +827,7 @@ const deleteDraftOutbound = async (user, outboundOrderId) => {
 const shipOutboundOrder = async (user, outboundOrderId, data) => {
     const { OutboundOrder, OutboundOrderLine } = require('../../models');
     const order = await OutboundOrder.findOne({
-        where: { id: outboundOrderId, company_id: user.companyId, deleted_at: null },
+        where: await applyWarehouseScope(user, { id: outboundOrderId, company_id: user.companyId, deleted_at: null }, 'warehouse_id', { canEdit: true }),
         include: [{ model: OutboundOrderLine, as: 'lines' }],
     });
     if (!order) {
@@ -911,7 +912,7 @@ const shipOutboundOrder = async (user, outboundOrderId, data) => {
 const receiveOutboundOrder = async (user, outboundOrderId, data) => {
     const { OutboundOrder, OutboundOrderLine } = require('../../models');
     const order = await OutboundOrder.findOne({
-        where: { id: outboundOrderId, company_id: user.companyId, deleted_at: null },
+        where: await applyWarehouseScope(user, { id: outboundOrderId, company_id: user.companyId, deleted_at: null }, 'warehouse_id', { canEdit: true }),
         include: [{ model: OutboundOrderLine, as: 'lines' }],
     });
     if (!order) {

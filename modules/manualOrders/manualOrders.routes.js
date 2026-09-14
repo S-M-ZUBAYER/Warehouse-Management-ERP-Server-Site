@@ -4,18 +4,23 @@ const express = require('express');
 const { body, query } = require('express-validator');
 const { requireRole } = require('../../middlewares/auth');
 const ctrl = require('./manualOrders.controller');
+const { requirePageAccess } = require('../../utils/permissions');
+const { requireOrderPackAccess, requireOrderSkuSearchAccess } = require('../../utils/orderPermissions');
 
 const router = express.Router();
 const afterShipCountries = ['PH', 'VN', 'TH', 'ID', 'MY', 'SG'];
 const easyParcelCountries = ['MY', 'SG', 'TH', 'ID', 'PH', 'VN'];
 
-router.get('/manual-orders/dropdowns', ctrl.getDropdowns);
-router.get('/manual-orders/sku-search', [
+router.get('/manual-orders/sku-search', requireOrderSkuSearchAccess, [
     query('warehouseId').notEmpty().withMessage('warehouseId is required').isInt({ min: 1 }),
     query('search').optional().isString(),
     query('page').optional().isInt({ min: 1 }),
     query('limit').optional().isInt({ min: 1, max: 200 }),
 ], ctrl.searchSkus);
+
+// SKU search is shared with platform orders; the other manual-order endpoints are not.
+router.use('/manual-orders', requirePageAccess('manual_order'));
+router.get('/manual-orders/dropdowns', ctrl.getDropdowns);
 router.get('/manual-orders/easyparcel/oauth/url', ctrl.getEasyParcelOAuthUrl);
 router.get('/manual-orders/aftership/config', [
     query('country').optional().isIn(afterShipCountries),
@@ -173,7 +178,7 @@ router.post('/manual-orders', [
     body('items').isArray({ min: 1 }).withMessage('items must be a non-empty array'),
     body('items.*.quantity').notEmpty().isInt({ min: 1 }).withMessage('item quantity must be at least 1'),
 ], ctrl.createManualOrder);
-router.post('/platform-orders/change-sku-mapping', [
+router.post('/platform-orders/change-sku-mapping', requireOrderPackAccess, [
     body('platform').notEmpty().isIn(['shopee', 'tiktok']),
     body('merchantSkuId').optional({ nullable: true }).isInt({ min: 1 }),
     body('combineSkuId').optional({ nullable: true }).isInt({ min: 1 }),
@@ -191,7 +196,7 @@ router.post('/platform-orders/change-sku-mapping', [
         return true;
     }),
 ], ctrl.changePlatformOrderSku);
-router.post('/platform-orders/pack-stock', [
+router.post('/platform-orders/pack-stock', requireOrderPackAccess, [
     body('platform').notEmpty().isIn(['shopee', 'tiktok']),
     body('order.items').isArray({ min: 1 }).withMessage('order.items must be a non-empty array'),
 ], ctrl.finalizePackedPlatformOrder);

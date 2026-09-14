@@ -4,6 +4,8 @@ const express = require('express');
 const { body, query } = require('express-validator');
 
 const ctrl = require('./withdrawOrders.controller');
+const { requirePageAccess } = require('../../utils/permissions');
+const { requireOrderReadAccess, requireOrderPackAccess } = require('../../utils/orderPermissions');
 
 const router = express.Router();
 
@@ -35,8 +37,8 @@ const deleteValidator = [
     body('orderIds.*').notEmpty().withMessage('orderId is required').trim().isLength({ min: 1, max: 100 }),
 ];
 
-router.get('/withdraw-orders', listValidator, ctrl.listWithdrawOrders);
-router.post('/withdraw-orders', upsertValidator, ctrl.upsertWithdrawOrders);
-router.delete('/withdraw-orders', deleteValidator, ctrl.deleteWithdrawOrders);
+router.get('/withdraw-orders', requireOrderReadAccess, listValidator, ctrl.listWithdrawOrders);
+router.post('/withdraw-orders', requirePageAccess('processed_order'), upsertValidator, ctrl.upsertWithdrawOrders);
+router.delete('/withdraw-orders', requireOrderPackAccess, deleteValidator, ctrl.deleteWithdrawOrders);
 
 module.exports = router;

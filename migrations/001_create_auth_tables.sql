@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS `users` (
     `name`          VARCHAR(100)    NOT NULL,
     `email`         VARCHAR(150)    NOT NULL,
     `password`      VARCHAR(255)    NOT NULL COMMENT 'bcrypt hashed',
-    `role`          ENUM('owner','admin','manager','staff','viewer') NOT NULL DEFAULT 'staff',
+    `role`          VARCHAR(255)     NOT NULL DEFAULT 'staff',
     `avatar_url`    LONGTEXT        DEFAULT NULL,
     `account_id`    VARCHAR(50)     DEFAULT NULL COMMENT 'Custom employee ID shown in UI e.g. EMP-001',
     `department`    VARCHAR(100)    DEFAULT NULL,

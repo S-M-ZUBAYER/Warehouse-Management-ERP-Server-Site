@@ -392,19 +392,22 @@ const setStockAlert = async (user, data) => {
         throw err;
     }
 
-    // Verify all records belong to this company
+    // Verify the entire selection before changing any stock alerts.
     const records = await SkuWarehouseStock.findAll({
         where: {
             id: { [Op.in]: skuIds },
             company_id: user.companyId,
         },
-        attributes: ['id'],
+        attributes: ['id', 'warehouse_id'],
     });
 
     if (records.length !== skuIds.length) {
         const err = new Error('One or more inventory records not found');
         err.statusCode = 404;
         throw err;
+    }
+    for (const warehouseId of new Set(records.map((record) => record.warehouse_id))) {
+        await assertWarehousePermission(user, warehouseId, { canEdit: true });
     }
 
     // Bulk update min_stock

@@ -159,6 +159,7 @@ const getInboundOrderById = async (user, inboundOrderId) => {
         err.statusCode = 404;
         throw err;
     }
+    await assertWarehousePermission(user, order.warehouse_id);
     return order;
 };
 
@@ -241,7 +242,7 @@ const updateDraftInbound = async (user, inboundOrderId, data) => {
     const { InboundOrder, InboundOrderLine, MerchantSku } = require('../../models');
 
     const order = await InboundOrder.findOne({
-        where: { id: inboundOrderId, company_id: user.companyId, deleted_at: null },
+        where: await applyWarehouseScope(user, { id: inboundOrderId, company_id: user.companyId, deleted_at: null }, 'warehouse_id', { canEdit: true }),
     });
     if (!order) {
         const err = new Error('Inbound order not found');
@@ -254,6 +255,9 @@ const updateDraftInbound = async (user, inboundOrderId, data) => {
         throw err;
     }
 
+    if (data.warehouseId !== undefined) {
+        await assertWarehousePermission(user, data.warehouseId, { canEdit: true });
+    }
     await sequelize.transaction(async (t) => {
         const updates = {};
         if (data.supplierName !== undefined) updates.supplier_name = data.supplierName;
@@ -305,7 +309,7 @@ const shipInboundOrder = async (user, inboundOrderId, data) => {
     } = require('../../models');
 
     const order = await InboundOrder.findOne({
-        where: { id: inboundOrderId, company_id: user.companyId, deleted_at: null },
+        where: await applyWarehouseScope(user, { id: inboundOrderId, company_id: user.companyId, deleted_at: null }, 'warehouse_id', { canEdit: true }),
         include: [{ model: InboundOrderLine, as: 'lines' }],
     });
     if (!order) {
@@ -387,7 +391,7 @@ const receiveInboundOrder = async (user, inboundOrderId, data) => {
     } = require('../../models');
 
     const order = await InboundOrder.findOne({
-        where: { id: inboundOrderId, company_id: user.companyId, deleted_at: null },
+        where: await applyWarehouseScope(user, { id: inboundOrderId, company_id: user.companyId, deleted_at: null }, 'warehouse_id', { canEdit: true }),
         include: [{ model: InboundOrderLine, as: 'lines' }],
     });
     if (!order) {
@@ -498,7 +502,7 @@ const cancelInboundOrder = async (user, inboundOrderId) => {
     const { InboundOrder, InboundOrderLine, SkuWarehouseStock, StockLedgerEntry } = require('../../models');
 
     const order = await InboundOrder.findOne({
-        where: { id: inboundOrderId, company_id: user.companyId, deleted_at: null },
+        where: await applyWarehouseScope(user, { id: inboundOrderId, company_id: user.companyId, deleted_at: null }, 'warehouse_id', { canEdit: true }),
         include: [{ model: InboundOrderLine, as: 'lines' }],
     });
     if (!order) {
@@ -561,6 +565,7 @@ const createManualInbound = async (user, data) => {
     } = require('../../models');
 
     const { warehouseId, supplierName, supplierReference, notes, lines } = data;
+    await assertWarehousePermission(user, warehouseId, { canEdit: true });
 
     // Validate warehouse belongs to company
     const warehouse = await Warehouse.findOne({

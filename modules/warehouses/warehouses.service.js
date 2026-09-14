@@ -3,7 +3,7 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const redis = require('../../config/redis');
-const { applyWarehouseScope, assertWarehousePermission } = require('../../utils/permissions');
+const { applyWarehouseScope, assertWarehousePermission, isOwner } = require('../../utils/permissions');
 
 // Redis cache key helper
 const cacheKey = (companyId, suffix = '') =>
@@ -39,7 +39,7 @@ const getWarehouses = async (user, filters = {}) => {
 
     // Try cache for simple unfiltered list
     const key = cacheKey(user.companyId, `with-total-sku:u${user.userId || 'owner'}:p${page}:l${limit}`);
-    if (!status && !attribute && !search) {
+    if (isOwner(user) && !status && !attribute && !search) {
         const cached = await redis.get(key);
         if (cached) return JSON.parse(cached);
     }
@@ -123,7 +123,7 @@ const getWarehouses = async (user, filters = {}) => {
     };
 
     // Cache 2 min for plain list
-    if (!status && !attribute && !search) {
+    if (isOwner(user) && !status && !attribute && !search) {
         await redis.set(key, JSON.stringify(result), { EX: 120 });
     }
 

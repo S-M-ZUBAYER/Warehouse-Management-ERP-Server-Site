@@ -4,6 +4,7 @@ const express = require('express');
 const { body, param, query } = require('express-validator');
 const ctrl = require('./orderActivityLogs.controller');
 const { sendError } = require('../../utils/response');
+const { requireOrderReadAccess } = require('../../utils/orderPermissions');
 
 const router = express.Router();
 const publicRouter = express.Router();
@@ -67,14 +68,16 @@ const createUserLogValidator = [
 
 router.get(
     '/platform-orders/:platform/:orderId/activity-logs',
+    requireOrderReadAccess,
     [platformValidator(param), orderIdParamValidator, query('companyId').optional({ nullable: true }).isInt({ min: 1 })],
     ctrl.listActivityLogs
 );
 
-router.post('/platform-orders/activity-logs', createUserLogValidator, ctrl.createActivityLog);
+router.post('/platform-orders/activity-logs', requireOrderReadAccess, createUserLogValidator, ctrl.createActivityLog);
 
 router.post(
     '/platform-orders/activity-logs/bulk',
+    requireOrderReadAccess,
     [
         body('logs').isArray({ min: 1 }).withMessage('logs must be a non-empty array'),
         body('logs.*.platform').notEmpty().withMessage('platform is required').isIn(['shopee', 'tiktok']),

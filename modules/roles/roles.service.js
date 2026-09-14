@@ -57,6 +57,7 @@ const DEFAULT_PERMISSIONS = {
                     shipped_order: false,
                     completed_order: false,
                     all_order: false,
+                    return_order: false,
                     canceled_order: false,
                 },
             },
@@ -410,7 +411,18 @@ const getPermissionTemplate = () => {
                 label: 'Inventory Management',
                 hasSub: true,
                 sub: [
+                    { key: 'merchant_sku', label: 'Merchant SKU' },
+                    {
+                        key: 'sku_mapping',
+                        label: 'SKU Mapping',
+                        hasSub: true,
+                        sub: [
+                            { key: 'sku_mapping_by_product', label: 'By Product' },
+                            { key: 'sku_mapping_by_merchant', label: 'By Merchant' },
+                        ],
+                    },
                     { key: 'inventory_list', label: 'Inventory List' },
+                    { key: 'manual_inbound', label: 'Manual Inbound' },
                     {
                         key: 'inbound',
                         label: 'Inbound',
@@ -422,6 +434,7 @@ const getPermissionTemplate = () => {
                         ]
                     },
                     { key: 'outbound_order', label: 'Outbound Order' },
+                    { key: 'inventory_log', label: 'Inventory Log' },
                 ],
             },
             {
@@ -436,9 +449,11 @@ const getPermissionTemplate = () => {
                         sub: [
                             { key: 'new_order', label: 'New Order' },
                             { key: 'processed_order', label: 'Processed Order' },
+                            { key: 'to_pickup_order', label: 'To Pickup Order' },
                             { key: 'shipped_order', label: 'Shipped Order' },
                             { key: 'completed_order', label: 'Completed Order' },
                             { key: 'all_order', label: 'All Orders' },
+                            { key: 'return_order', label: 'Return Order' },
                             { key: 'canceled_order', label: 'Canceled Order' },
                         ]
                     },

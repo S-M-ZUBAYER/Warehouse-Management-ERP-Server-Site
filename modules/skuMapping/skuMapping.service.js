@@ -16,7 +16,7 @@
  */
 
 const { Op, UniqueConstraintError } = require('sequelize');
-const { getPermittedStoreIds, assertStorePermission, applyWarehouseScope } = require('../../utils/permissions'); 
+const { getPermittedStoreIds, getPermittedWarehouseIds, assertStorePermission, applyWarehouseScope } = require('../../utils/permissions');
 
 
 const buildPlatformMappingFields = (platformProduct, platformStore, fulfillmentWarehouseId, userId) => ({
@@ -132,6 +132,19 @@ const getMerchantSkuList = async (user, filters = {}) => {
     }
 
     const where = { company_id: user.companyId, deleted_at: null };
+    const permittedWarehouseIds = await getPermittedWarehouseIds(user);
+    if (Array.isArray(permittedWarehouseIds)) {
+        const assignedStock = await SkuWarehouseStock.findAll({
+            where: { company_id: user.companyId, warehouse_id: { [Op.in]: permittedWarehouseIds } },
+            attributes: ['merchant_sku_id'],
+            group: ['merchant_sku_id'],
+            raw: true,
+        });
+        where[Op.and] = [{ [Op.or]: [
+            { warehouse_id: { [Op.in]: permittedWarehouseIds } },
+            { id: { [Op.in]: assignedStock.map((row) => row.merchant_sku_id) } },
+        ] }];
+    }
     if (excludedIds.length) where.id = { [Op.notIn]: [...new Set(excludedIds)] };
     if (search?.trim()) {
         const q = `%${search.trim()}%`;
@@ -318,6 +331,26 @@ const getMerchantSkuList = async (user, filters = {}) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const getMerchantSkuCounts = async (user) => {
     const { sequelize } = require('../../config/database');
+    const permittedWarehouseIds = await getPermittedWarehouseIds(user);
+    const permittedStoreIds = await getPermittedStoreIds(user);
+    if (Array.isArray(permittedWarehouseIds) && !permittedWarehouseIds.length) {
+        return { all: 0, mapped: 0, unmapped: 0 };
+    }
+    const replacements = { companyId: user.companyId };
+    let storeScope = '';
+    let warehouseScope = '';
+    if (Array.isArray(permittedStoreIds)) {
+        replacements.storeIds = permittedStoreIds.length ? permittedStoreIds : [-1];
+        storeScope = 'AND psm.platform_store_id IN (:storeIds)';
+    }
+    if (Array.isArray(permittedWarehouseIds)) {
+        replacements.warehouseIds = permittedWarehouseIds;
+        warehouseScope = `AND (ms.warehouse_id IN (:warehouseIds) OR EXISTS (
+            SELECT 1 FROM sku_warehouse_stock sws
+            WHERE sws.merchant_sku_id = ms.id AND sws.company_id = :companyId
+              AND sws.warehouse_id IN (:warehouseIds)
+        ))`;
+    }
 
     const [result] = await sequelize.query(
         `SELECT
@@ -327,8 +360,9 @@ const getMerchantSkuCounts = async (user) => {
          FROM merchant_skus ms
          LEFT JOIN platform_sku_mappings psm
              ON psm.merchant_sku_id = ms.id AND psm.is_active = 1 AND psm.deleted_at IS NULL
-         WHERE ms.company_id = :companyId AND ms.deleted_at IS NULL`,
-        { replacements: { companyId: user.companyId }, type: sequelize.QueryTypes.SELECT }
+             AND psm.company_id = :companyId ${storeScope}
+         WHERE ms.company_id = :companyId AND ms.deleted_at IS NULL ${warehouseScope}`,
+        { replacements, type: sequelize.QueryTypes.SELECT }
     );
 
     return {

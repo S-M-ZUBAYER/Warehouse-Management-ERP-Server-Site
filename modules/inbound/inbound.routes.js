@@ -6,7 +6,7 @@ const express = require('express');
 const router = express.Router();
 
 const ctrl = require('./inbound.controller');
-const { authenticate, requireRole } = require('../../middlewares/auth');
+const { authenticate } = require('../../middlewares/auth');
 const {
     createInboundValidator,
     shipInboundValidator,
@@ -45,7 +45,7 @@ router.put('/:id', ctrl.updateDraftInbound);
 router.put('/:id/ship', shipInboundValidator, ctrl.shipInboundOrder);
 
 // PUT /api/v1/inbound/:id/receive  — warehouse receives → completed + stock update
-router.put('/:id/receive', requireRole('owner', 'admin', 'manager', 'warehouse'), receiveInboundValidator, ctrl.receiveInboundOrder);
+router.put('/:id/receive', receiveInboundValidator, ctrl.receiveInboundOrder);
 
 // PUT /api/v1/inbound/:id/cancel   — cancel (draft or on_the_way only)
 router.put('/:id/cancel', ctrl.cancelInboundOrder);

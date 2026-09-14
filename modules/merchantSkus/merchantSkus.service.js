@@ -462,6 +462,14 @@ const deleteMerchantSku = async (user, skuId) => {
         throw err;
     }
 
+    if (sku.warehouse_id) await assertWarehousePermission(user, sku.warehouse_id, { canEdit: true });
+    const assignedStocks = await SkuWarehouseStock.findAll({
+        where: { merchant_sku_id: skuId, company_id: user.companyId },
+        attributes: ['warehouse_id'], raw: true,
+    });
+    for (const stock of assignedStocks) {
+        await assertWarehousePermission(user, stock.warehouse_id, { canEdit: true });
+    }
     // Block if used in combine SKU
     const usedInCombine = await CombineSkuItem.count({
         where: { merchant_sku_id: skuId, company_id: user.companyId },
@@ -514,6 +522,17 @@ const bulkDeleteMerchantSkus = async (user, skuIds) => {
         const err = new Error('One or more SKUs not found');
         err.statusCode = 404;
         throw err;
+    }
+    const assignedStocks = await SkuWarehouseStock.findAll({
+        where: { merchant_sku_id: { [Op.in]: skuIds }, company_id: user.companyId },
+        attributes: ['warehouse_id'], raw: true,
+    });
+    const warehouseIds = new Set([
+        ...skus.map((sku) => sku.warehouse_id).filter(Boolean),
+        ...assignedStocks.map((stock) => stock.warehouse_id),
+    ]);
+    for (const warehouseId of warehouseIds) {
+        await assertWarehousePermission(user, warehouseId, { canEdit: true });
     }
 
     const usedCount = await CombineSkuItem.count({

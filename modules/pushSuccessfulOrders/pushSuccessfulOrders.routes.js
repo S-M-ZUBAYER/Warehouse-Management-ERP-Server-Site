@@ -4,6 +4,7 @@ const express = require('express');
 const { body, query } = require('express-validator');
 
 const ctrl = require('./pushSuccessfulOrders.controller');
+const { requireOrderReadAccess, requireOrderPackAccess } = require('../../utils/orderPermissions');
 
 const router = express.Router();
 
@@ -27,7 +28,7 @@ const upsertValidator = [
     body('orders.*.orderId').notEmpty().withMessage('orderId is required').trim().isLength({ min: 1, max: 100 }),
 ];
 
-router.get('/push-successful-orders', listValidator, ctrl.listPushSuccessfulOrders);
-router.post('/push-successful-orders', upsertValidator, ctrl.upsertPushSuccessfulOrders);
+router.get('/push-successful-orders', requireOrderReadAccess, listValidator, ctrl.listPushSuccessfulOrders);
+router.post('/push-successful-orders', requireOrderPackAccess, upsertValidator, ctrl.upsertPushSuccessfulOrders);
 
 module.exports = router;
